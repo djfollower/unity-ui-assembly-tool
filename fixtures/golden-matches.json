@@ -1,0 +1,52 @@
+[
+  {
+    "element_id": "Scrim",
+    "status": "missing",
+    "matched_asset_id": null,
+    "signals": { "visual": 0, "structural": 0, "agree": false, "margin": 0 }
+  },
+  {
+    "element_id": "icon_glow",
+    "status": "matched",
+    "matched_asset_id": "UIElements__ui_img_glow",
+    "signals": { "visual": 1, "structural": 1, "agree": true, "margin": 1 }
+  },
+  {
+    "element_id": "icon_heart",
+    "status": "matched",
+    "matched_asset_id": "UIElements__icon_heart",
+    "signals": { "visual": 1, "structural": 1, "agree": true, "margin": 1 }
+  },
+  {
+    "element_id": "button_continue",
+    "status": "matched",
+    "matched_asset_id": "UIElements__button_green",
+    "signals": { "visual": 1, "structural": 1, "agree": true, "margin": 1 },
+    "resize": { "safe": true, "size_delta_to": { "w": 838, "h": 285 } }
+  },
+  {
+    "element_id": "button_x",
+    "status": "matched",
+    "matched_asset_id": "UIElements__button_x",
+    "signals": { "visual": 1, "structural": 1, "agree": true, "margin": 1 }
+  },
+  {
+    "element_id": "icon_gem",
+    "status": "missing",
+    "matched_asset_id": null,
+    "signals": { "visual": 0, "structural": 0, "agree": false, "margin": 0 }
+  },
+  {
+    "element_id": "button_share",
+    "status": "missing",
+    "matched_asset_id": null,
+    "signals": { "visual": 0, "structural": 0, "agree": false, "margin": 0 }
+  },
+  {
+    "element_id": "button_upgrade",
+    "status": "matched",
+    "matched_asset_id": "UIElements__ButtonFrameTint",
+    "signals": { "visual": 1, "structural": 1, "agree": true, "margin": 1 },
+    "resize": { "safe": true, "size_delta_to": { "w": 400, "h": 175 } }
+  }
+]

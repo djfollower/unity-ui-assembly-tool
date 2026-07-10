@@ -1,0 +1,44 @@
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 12px; padding: 12px; margin: 0; }
+  button { width: 100%; padding: 8px; margin-top: 10px; cursor: pointer; }
+  #status { line-height: 1.5; color: #333; word-break: break-word; }
+  code { background: #f0f0f0; padding: 2px 5px; border-radius: 3px; font-size: 11px; }
+</style>
+<div id="status">Select one frame in Figma, then re-run this plugin.</div>
+<button id="download" style="display:none">Download JSON</button>
+
+<script>
+  let payload = null;
+
+  window.onmessage = (event) => {
+    const msg = event.data.pluginMessage;
+    if (!msg) return;
+
+    if (msg.type === "error") {
+      document.getElementById("status").textContent = msg.message;
+      document.getElementById("download").style.display = "none";
+      return;
+    }
+
+    if (msg.type === "export") {
+      payload = msg;
+      const targetPath = `.cache/figma/${msg.fileKey}/${msg.nodeId.replace(":", "-")}.json`;
+      document.getElementById("status").innerHTML =
+        `Exported "<b>${msg.nodeName}</b>". Click Download, then move the downloaded file into the tool repo at:<br><code>${targetPath}</code>`;
+      document.getElementById("download").style.display = "block";
+    }
+  };
+
+  document.getElementById("download").onclick = () => {
+    if (!payload) return;
+    const blob = new Blob([payload.json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${payload.fileKey}__${payload.nodeId.replace(":", "-")}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+</script>

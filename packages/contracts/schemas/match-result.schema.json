@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ui-assembler-slice/contracts/match-result.schema.json",
+  "title": "MatchResult",
+  "description": "Per-element matcher verdict, produced by the MCP tool's two-factor gate (R5) and consumed by the Unity assembler.",
+  "type": "array",
+  "items": { "$ref": "#/definitions/matchResult" },
+  "definitions": {
+    "matchResult": {
+      "type": "object",
+      "required": ["element_id", "status", "matched_asset_id", "signals"],
+      "additionalProperties": false,
+      "properties": {
+        "element_id": {
+          "type": "string",
+          "description": "References element-tree.json's elements[].id."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["matched", "uncertain", "missing"]
+        },
+        "matched_asset_id": {
+          "type": ["string", "null"],
+          "description": "References catalog-entry.json's id; null when status is missing."
+        },
+        "signals": {
+          "type": "object",
+          "required": ["visual", "structural", "agree", "margin"],
+          "additionalProperties": false,
+          "properties": {
+            "visual": { "type": "number", "minimum": 0, "maximum": 1 },
+            "structural": { "type": "number", "minimum": 0, "maximum": 1 },
+            "agree": { "type": "boolean" },
+            "margin": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Score margin over the runner-up candidate (R5)."
+            }
+          }
+        },
+        "resize": {
+          "type": "object",
+          "required": ["safe"],
+          "additionalProperties": false,
+          "description": "Present when matched_asset_id's native size differs from the element's rect (R14).",
+          "properties": {
+            "safe": {
+              "type": "boolean",
+              "description": "true for Sliced/Tiled auto-resize; false when a Simple-type asset would distort beyond tolerance."
+            },
+            "size_delta_to": {
+              "type": "object",
+              "required": ["w", "h"],
+              "additionalProperties": false,
+              "properties": {
+                "w": { "type": "number", "exclusiveMinimum": 0 },
+                "h": { "type": "number", "exclusiveMinimum": 0 }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

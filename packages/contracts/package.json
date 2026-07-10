@@ -1,0 +1,20 @@
+{
+  "name": "@ui-assembler-slice/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared JSON Schemas + generated TS types for the vertical slice. Source of truth for the MCP tool <-> Unity Editor handoff.",
+  "main": "src/types.ts",
+  "types": "src/types.ts",
+  "scripts": {
+    "generate": "node scripts/generate.js",
+    "validate-schemas": "node scripts/validate-schemas.js",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run generate && npm run validate-schemas && npm run typecheck"
+  },
+  "devDependencies": {
+    "ajv": "^8.17.1",
+    "json-schema-to-typescript": "^15.0.3",
+    "typescript": "^5.7.2"
+  }
+}

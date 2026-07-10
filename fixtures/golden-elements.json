@@ -1,0 +1,102 @@
+{
+  "source": "figma",
+  "frame_id": "178:35186",
+  "source_frame": { "w": 1208.5, "h": 2622 },
+  "canvas_reference": { "w": 1206, "h": 2622 },
+  "canvas_match_mode": "match_width_or_height",
+  "canvas_match_value": 1,
+  "elements": [
+    {
+      "id": "Scrim",
+      "figma_node_id": "178:34516",
+      "type": "overlay",
+      "rect": { "x": 0.5, "y": 0, "w": 1208, "h": 2622 },
+      "visual_description": "full-screen dark dimming scrim behind the popup",
+      "is_component_instance": true,
+      "children": []
+    },
+    {
+      "id": "text_title",
+      "figma_node_id": "178:34523",
+      "type": "text",
+      "rect": { "x": 123.49, "y": 448.49, "w": 962.01, "h": 218 },
+      "visual_description": "large yellow outlined headline text",
+      "text_content": "Are you Sure?",
+      "is_component_instance": false,
+      "children": []
+    },
+    {
+      "id": "text_subtitle",
+      "figma_node_id": "178:34518",
+      "type": "text",
+      "rect": { "x": 123.49, "y": 666.49, "w": 962.01, "h": 112.5 },
+      "visual_description": "white outlined subtitle text",
+      "text_content": "You will lose:",
+      "is_component_instance": false,
+      "children": []
+    },
+    {
+      "id": "icon_glow",
+      "figma_node_id": "178:34519",
+      "type": "image",
+      "rect": { "x": 96.91, "y": 818.33, "w": 1014.69, "h": 1014.69 },
+      "visual_description": "soft radial glow behind the heart icon",
+      "is_component_instance": true,
+      "children": []
+    },
+    {
+      "id": "icon_heart",
+      "figma_node_id": "178:34520",
+      "type": "image",
+      "rect": { "x": 269.8, "y": 994.68, "w": 695, "h": 695 },
+      "visual_description": "large glossy red heart icon",
+      "is_component_instance": true,
+      "children": []
+    },
+    {
+      "id": "button_continue",
+      "figma_node_id": "178:34525",
+      "type": "button",
+      "rect": { "x": 193.01, "y": 2169.87, "w": 838, "h": 285 },
+      "visual_description": "green rounded button, label 'Continue' with coin icon and '100' cost",
+      "is_component_instance": true,
+      "children": []
+    },
+    {
+      "id": "button_x",
+      "figma_node_id": "178:34527",
+      "type": "button",
+      "rect": { "x": 986.64, "y": 188.87, "w": 128, "h": 128 },
+      "visual_description": "small red rounded close/X button, top right",
+      "is_component_instance": true,
+      "children": []
+    },
+    {
+      "id": "icon_gem",
+      "figma_node_id": "synthetic:icon_gem",
+      "type": "icon",
+      "rect": { "x": 850, "y": 150, "w": 120, "h": 120 },
+      "visual_description": "purple gem/diamond currency icon - SYNTHETIC, does not exist in the real Figma frame, added only for Gate 2 missing-recall testing (no matching catalog asset exists). Excluded from Gate 1 scoring via the synthetic: figma_node_id prefix - see score_gate1.py.",
+      "is_component_instance": false,
+      "children": []
+    },
+    {
+      "id": "button_share",
+      "figma_node_id": "synthetic:button_share",
+      "type": "button",
+      "rect": { "x": 50, "y": 150, "w": 160, "h": 80 },
+      "visual_description": "blue share/social button - SYNTHETIC, does not exist in the real Figma frame, added only for Gate 2 missing-recall testing (no matching catalog asset exists). Excluded from Gate 1 scoring via the synthetic: figma_node_id prefix - see score_gate1.py.",
+      "is_component_instance": false,
+      "children": []
+    },
+    {
+      "id": "button_upgrade",
+      "figma_node_id": "synthetic:button_upgrade",
+      "type": "button",
+      "rect": { "x": 50, "y": 260, "w": 400, "h": 175 },
+      "visual_description": "teal/purple tinted rounded button - SYNTHETIC, does not exist in the real Figma frame, added to test tint-aware matching against a real tinted catalog asset (UIElements__ButtonFrameTint, tint #7349FF). Excluded from Gate 1 scoring via the synthetic: figma_node_id prefix - see score_gate1.py.",
+      "is_component_instance": false,
+      "children": []
+    }
+  ]
+}
