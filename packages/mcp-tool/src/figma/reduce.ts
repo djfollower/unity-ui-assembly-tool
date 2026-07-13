@@ -4,16 +4,17 @@
 // parse-tree.ts; normalize.ts (T1.10) converts to canvas reference space).
 // Feeds Gate 1 directly.
 //
-// Shells out to the `claude` CLI rather than @anthropic-ai/sdk, reusing this
-// environment's already-authenticated session instead of requiring a
-// separate ANTHROPIC_API_KEY. Deliberately does NOT use --bare: bare mode
-// only accepts ANTHROPIC_API_KEY/apiKeyHelper auth (never OAuth/keychain),
-// which would defeat the point. Dev-time choice - swap for the SDK + a real
-// API key before this needs to run unattended in CI (the CLI needs an
-// interactive login).
+// Uses the agent adapter (src/agent/ - originally this file's own private
+// CLI-shelling logic, generalized when visual-signal.ts needed the same
+// "reuse an already-authenticated agent CLI, not a separate metered API
+// key" approach for its multimodal calls too). Still needs the CLI's
+// interactive login, so this can't run fully unattended in CI yet - that
+// part is unchanged from before this refactor, just now shared instead of
+// duplicated.
 
-import { spawn } from "node:child_process";
 import type { ElementTree } from "@ui-assembler-slice/contracts";
+import { getAgentAdapter } from "../agent/registry.js";
+import { parseJsonResponse } from "../agent/parse-json-response.js";
 import type { IntermediateNode } from "./parse-tree.js";
 
 export type ReducedElement = ElementTree["elements"][number];
@@ -33,50 +34,7 @@ Rules:
 
 export async function reduce(intermediateTree: IntermediateNode): Promise<ReducedElement[]> {
   const prompt = `${INSTRUCTIONS}\n\nRaw intermediate node tree:\n${JSON.stringify(intermediateTree, null, 2)}`;
-  const cliOutput = await runClaudeCli(prompt);
-  const jsonText = extractJson(cliOutput);
-
-  try {
-    return JSON.parse(jsonText) as ReducedElement[];
-  } catch (err) {
-    throw new Error(`reduce: failed to parse LLM output as JSON: ${(err as Error).message}\n---\n${jsonText}`);
-  }
-}
-
-function runClaudeCli(prompt: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn("claude", ["-p", "--output-format", "json"], { stdio: ["pipe", "pipe", "pipe"] });
-
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
-
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(`claude CLI exited with code ${code}: ${stderr}`));
-        return;
-      }
-      resolve(stdout);
-    });
-
-    child.stdin.write(prompt);
-    child.stdin.end();
-  });
-}
-
-function extractJson(cliOutput: string): string {
-  let text = cliOutput;
-  try {
-    const envelope = JSON.parse(cliOutput) as { result?: string };
-    if (typeof envelope.result === "string") {
-      text = envelope.result;
-    }
-  } catch {
-    // cliOutput wasn't the JSON envelope (e.g. --output-format text) - use as-is.
-  }
-
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  return (fenced ? fenced[1] : text).trim();
+  const adapter = await getAgentAdapter();
+  const responseText = await adapter.complete(prompt);
+  return parseJsonResponse<ReducedElement[]>(responseText);
 }

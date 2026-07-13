@@ -69,7 +69,35 @@
       "rect": { "x": 986.64, "y": 188.87, "w": 128, "h": 128 },
       "visual_description": "small red rounded close/X button, top right",
       "is_component_instance": true,
-      "children": []
+      "children": [
+        {
+          "id": "button_x_frame",
+          "figma_node_id": "synthetic:button_x_frame",
+          "type": "image",
+          "rect": { "x": 986.64, "y": 188.87, "w": 128, "h": 128 },
+          "visual_description": "red rounded-square button frame/background, tinted at runtime",
+          "is_component_instance": false,
+          "children": []
+        },
+        {
+          "id": "button_x_base",
+          "figma_node_id": "synthetic:button_x_base",
+          "type": "image",
+          "rect": { "x": 986.64, "y": 188.87, "w": 128, "h": 128 },
+          "visual_description": "backing layer stacked beneath the X icon (from the button_x sprite asset - exact visual role unconfirmed, see HANDOFF.md)",
+          "is_component_instance": false,
+          "children": []
+        },
+        {
+          "id": "button_x_icon",
+          "figma_node_id": "synthetic:button_x_icon",
+          "type": "icon",
+          "rect": { "x": 986.64, "y": 188.87, "w": 128, "h": 128 },
+          "visual_description": "white X glyph with red outline, centered on the button",
+          "is_component_instance": false,
+          "children": []
+        }
+      ]
     },
     {
       "id": "icon_gem",

@@ -49,7 +49,11 @@ export function normalize(
   };
 }
 
-function computeScaleFactor(
+// Exported for element-crop.ts (T2.3), which needs to invert this same
+// transform: element-tree.json's rects are post-normalize (canvas_reference
+// space), but cropping fixtures/frame-export.png requires source_frame
+// pixel space - the two share one scale factor, computed here once.
+export function computeScaleFactor(
   sourceFrame: { w: number; h: number },
   canvasScaler: CanvasScalerConfig,
 ): number {

@@ -25,9 +25,21 @@
     "resize": { "safe": true, "size_delta_to": { "w": 838, "h": 285 } }
   },
   {
-    "element_id": "button_x",
+    "element_id": "button_x_frame",
+    "status": "matched",
+    "matched_asset_id": "UIElements__button_frame_x",
+    "signals": { "visual": 1, "structural": 1, "agree": true, "margin": 1 }
+  },
+  {
+    "element_id": "button_x_base",
     "status": "matched",
     "matched_asset_id": "UIElements__button_x",
+    "signals": { "visual": 1, "structural": 1, "agree": true, "margin": 1 }
+  },
+  {
+    "element_id": "button_x_icon",
+    "status": "matched",
+    "matched_asset_id": "UIElements__icon_x",
     "signals": { "visual": 1, "structural": 1, "agree": true, "margin": 1 }
   },
   {

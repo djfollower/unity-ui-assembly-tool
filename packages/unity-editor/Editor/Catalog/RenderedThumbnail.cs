@@ -25,6 +25,28 @@ namespace UiAssemblerSlice.Editor.Catalog
     /// Blit/RenderTexture returns flat/uninitialized output under
     /// -nographics on this machine (see scripts/logs/t1.5-nographics-probe.log
     /// vs t1.5-graphics-probe.log).
+    ///
+    /// button_x/button_settings thumbnail bug, resolved: the border ints
+    /// passed to Graphics.DrawTexture were being multiplied by `scale`
+    /// (the canonicalSize/nativeSize upscale factor) on the theory that
+    /// they're destination-space pixels - confirmed WRONG via an isolated
+    /// synthetic-texture test (see SmokeTest.ProbeDrawTextureBorderSemantics
+    /// and HANDOFF.md): they're literal, UNSCALED source-texture pixel
+    /// counts. Multiplying by scale (>1 whenever a sprite needs upscaling
+    /// to fill the canonical thumbnail) inflated the border past the
+    /// source texture's own bounds, and DrawTexture tiles/repeats the
+    /// source rather than erroring - exactly the "duplicated" look. It
+    /// went unnoticed for other assets needing the same upscale (e.g.
+    /// button_frame_x) only because their art is simple/mostly-flat-colored
+    /// enough that tiling isn't visually obvious. Two earlier fix attempts
+    /// this session chased a different, adjacent theory (SpriteAtlas
+    /// packing/trim requiring the source texture to be resolved via
+    /// Sprite.texture + isolated into its own standalone texture) before
+    /// this one was found - that approach turned out unnecessary for this
+    /// bug and caused its own regression (button_frame_blue rendering as a
+    /// flat, structureless fill), so it was reverted; loading the raw
+    /// Texture2D by path, as this file always did, is sufficient once the
+    /// border scaling itself is correct.
     public static class RenderedThumbnail
     {
         private static Texture2D ResolveSourceTexture(DiscoveredAsset asset)
@@ -77,23 +99,40 @@ namespace UiAssemblerSlice.Editor.Catalog
 
                 if (metadata.ImageType == "Sliced")
                 {
-                    // Border values are in the sprite's own native texture
-                    // pixels - Unity renders 9-slice corners at that literal
-                    // pixel size regardless of the button's authored rect
-                    // size (only the middle stretches). Fitting the whole
-                    // authored-size render into canonicalSize applies one
-                    // more uniform downscale - which must apply to the
-                    // border thickness too, or corners overflow the shrunk
-                    // rect and the render corrupts. Only masked before now
-                    // because every earlier Sliced test case happened to
-                    // render at scale exactly 1.
-                    var b0 = (int)(metadata.Border[0] * scale);
-                    var b1 = (int)(metadata.Border[1] * scale);
-                    var b2 = (int)(metadata.Border[2] * scale);
-                    var b3 = (int)(metadata.Border[3] * scale);
+                    // Border ints are literal source-texture pixels, NOT
+                    // scaled by `scale` - see the class doc comment above.
+                    // But corners preserving their literal pixel size means
+                    // a border sum CAN exceed destRect's own size on an
+                    // axis when the asset needs significant downscaling
+                    // (large native size relative to canonicalSize, e.g.
+                    // UIElements__ButtonFrameTint at 531x232 -> a 256-wide,
+                    // ~112-tall destRect, where the unscaled top+bottom
+                    // border sum is 229px against that 112px height) -
+                    // Graphics.DrawTexture doesn't clamp this itself and
+                    // corrupts the render, same failure family as the
+                    // upscale bug this file just fixed, just the opposite
+                    // direction. Real Unity UI Images handle this by
+                    // shrinking the border proportionally once it would
+                    // exceed the element's own box - mirror that here.
+                    var b0 = metadata.Border[0];
+                    var b1 = metadata.Border[1];
+                    var b2 = metadata.Border[2];
+                    var b3 = metadata.Border[3];
+                    if (b0 + b2 > destRect.width && b0 + b2 > 0)
+                    {
+                        var horizontalClamp = destRect.width / (b0 + b2);
+                        b0 *= horizontalClamp;
+                        b2 *= horizontalClamp;
+                    }
+                    if (b1 + b3 > destRect.height && b1 + b3 > 0)
+                    {
+                        var verticalClamp = destRect.height / (b1 + b3);
+                        b1 *= verticalClamp;
+                        b3 *= verticalClamp;
+                    }
                     // spriteBorder order is [left, bottom, right, top];
                     // DrawTexture wants (leftBorder, rightBorder, topBorder, bottomBorder).
-                    Graphics.DrawTexture(destRect, texture, new Rect(0, 0, 1, 1), b0, b2, b3, b1, tint);
+                    Graphics.DrawTexture(destRect, texture, new Rect(0, 0, 1, 1), (int)b0, (int)b2, (int)b3, (int)b1, tint);
                 }
                 else
                 {

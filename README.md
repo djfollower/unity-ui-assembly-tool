@@ -43,12 +43,19 @@ read that cache path first, regardless of which path filled it, and only hit the
 `FIGMA_ACCESS_TOKEN` from `.env`, copied from `.env.example`) when explicitly forced - expect to
 burn the monthly quota fast if you do.
 
-### Anthropic access
+### Agent access (Claude, no separate API key)
 
-`reduce.ts` (T1.9) shells out to the `claude` CLI rather than `@anthropic-ai/sdk`, reusing this
-environment's already-authenticated session instead of requiring a separate `ANTHROPIC_API_KEY`.
-This is a dev-time convenience, not the final design - the CLI needs an interactive login, so swap
-this for the SDK + a real API key before the pipeline needs to run unattended in CI.
+`reduce.ts` (T1.9) and `visual-signal.ts` (T2.3) both go through `packages/mcp-tool/src/agent/` -
+an agent-CLI adapter, not a direct SDK call - which shells out to the `claude` CLI and reuses its
+existing subscription/OAuth login rather than requiring a separate metered `ANTHROPIC_API_KEY`.
+Requires the `claude` CLI installed and authenticated (`claude --version` should succeed).
+
+This is a dev-time convenience, not the final design - the CLI needs an interactive login, so it
+can't run fully unattended (e.g. in CI) yet. The adapter interface (`src/agent/adapter.ts`) is
+deliberately agent-agnostic - Claude is the only implemented adapter today, but adding another
+coding-agent CLI (or, longer-term, a Unity AI Assistant adapter that runs Editor-side instead of as
+a Node-spawned CLI - see HANDOFF.md) means implementing that one interface and registering it in
+`src/agent/registry.ts`, without touching `reduce.ts`/`visual-signal.ts`.
 
 ### Running Unity batch mode
 
@@ -93,6 +100,6 @@ Image component states. See the implementation plan's
 day-by-day task breakdown for what's next (T2.2 candidates.ts).
 
 Fixture in use: Melon project, frame "Lose Screen" (`178:35186`), feature folder
-`Assets/Textures/UI/UI Elements` (62 sprites, 0 prefabs - no tint usage exists for this folder, so
-`RenderMetadata.TintHex` is always `null` here; the tinted-asset Gate 2 test case will need a
-different source).
+`Assets/Textures/UI/UI Elements` (62 sprites) plus 3 explicit extra prefabs (`ButtonFrame`,
+`ButtonFrameTint`, `Scrim` - see `-extraPrefabPaths` in `scripts/build-catalog.sh`), 65 catalog
+entries total.
