@@ -10,8 +10,21 @@ import path from "node:path";
 import type { ElementTree, MatchResult } from "@ui-assembler-slice/contracts";
 import { loadCatalog } from "./catalog/load-catalog.js";
 import { matchElementTree } from "./matcher/match.js";
-import { fetchFrame } from "./figma/fetch-frame.js";
+import { fetchFrame, cachePathFor } from "./figma/fetch-frame.js";
 import { computeNodeRect } from "./figma/node-rect.js";
+import { parseTree } from "./figma/parse-tree.js";
+import { reduce } from "./figma/reduce.js";
+import { normalize } from "./figma/normalize.js";
+
+// Hardcoded to match the real Melon project's CanvasScaler setting - same
+// pin fixtures/golden-elements.json uses (source_frame comes from the
+// fetched frame's own absoluteBoundingBox at runtime; only the scaler
+// config is fixed). normalize.ts documents why this is not a live query.
+const CANVAS_SCALER_CONFIG = {
+  referenceResolution: { w: 1206, h: 2622 },
+  matchMode: "match_width_or_height" as const,
+  matchValue: 1,
+};
 
 // Same small inline .env loader as scripts/*.mjs (fetch-figma-frame.mjs,
 // smoke-test-figma.mjs) - intentional duplication, not worth a "dotenv"
@@ -104,9 +117,76 @@ async function runFigmaNodeRect(args: string[]): Promise<void> {
   }));
 }
 
+function readEnvOrFail(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    console.error(`${name} not set (check .env / .env.example)`);
+    process.exit(1);
+  }
+  return value;
+}
+
+async function runFetchFrame(args: string[]): Promise<void> {
+  loadEnvFile(path.join(repoRoot(), ".env"));
+  const forceRefresh = args.includes("--refresh");
+  const fileKey = readEnvOrFail("FIGMA_FILE_KEY");
+  const nodeId = readEnvOrFail("FIGMA_NODE_ID");
+  // Access token only required when actually hitting the network - the
+  // cached path (the common case, see fetch-frame.ts's own comment) needs
+  // nothing beyond the file/node id.
+  const accessToken = process.env.FIGMA_ACCESS_TOKEN ?? "";
+  if (forceRefresh && !accessToken) {
+    console.error("--refresh requested but FIGMA_ACCESS_TOKEN not set");
+    process.exit(1);
+  }
+
+  const cachePath = cachePathFor(fileKey, nodeId);
+  const node = await fetchFrame({ fileKey, nodeId, accessToken, forceRefresh });
+  console.log(`fetched "${node.name}" (${nodeId}) -> ${cachePath}`);
+}
+
+async function runReduce(args: string[]): Promise<void> {
+  loadEnvFile(path.join(repoRoot(), ".env"));
+  const outputPathArg = args.find((a) => !a.startsWith("--"));
+  const outputPath = outputPathArg ?? path.join(repoRoot(), ".cache", "element-tree.json");
+
+  const fileKey = readEnvOrFail("FIGMA_FILE_KEY");
+  const nodeId = readEnvOrFail("FIGMA_NODE_ID");
+
+  const frameNode = await fetchFrame({
+    fileKey,
+    nodeId,
+    accessToken: process.env.FIGMA_ACCESS_TOKEN ?? "",
+  });
+
+  const bbox = frameNode.absoluteBoundingBox;
+  if (!bbox) {
+    console.error(`reduce: frame node ${nodeId} has no absoluteBoundingBox`);
+    process.exit(1);
+  }
+
+  const intermediate = parseTree(frameNode);
+  console.error(`parsed ${intermediate.name} - reducing via agent adapter...`);
+  const reduced = await reduce(intermediate);
+  console.error(`reduced to ${reduced.length} element(s) - normalizing`);
+  const elementTree = normalize(reduced, {
+    frameId: nodeId,
+    sourceFrame: { w: bbox.width, h: bbox.height },
+  }, CANVAS_SCALER_CONFIG);
+
+  await writeFile(outputPath, JSON.stringify(elementTree, null, 2));
+  console.log(`element-tree.json: ${outputPath}`);
+}
+
 const [, , command, ...args] = process.argv;
 
 switch (command) {
+  case "fetch-frame":
+    await runFetchFrame(args);
+    break;
+  case "reduce":
+    await runReduce(args);
+    break;
   case "match":
     await runMatch(args);
     break;
@@ -115,5 +195,6 @@ switch (command) {
     break;
   default:
     console.error(`Unknown or unimplemented command: ${command ?? "(none)"}`);
+    console.error("Commands: fetch-frame [--refresh] | reduce [output.json] | match <element-tree.json> <catalog.json> [output.json] | figma-node-rect <figma-node-id> [element-tree.json]");
     process.exit(1);
 }

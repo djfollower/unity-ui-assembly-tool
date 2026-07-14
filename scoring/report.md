@@ -232,3 +232,44 @@ assembled prefab end-to-end and re-scored:
 reverted along with it). Verified with real rendered output (not just re-reading serialized data)
 that both `UIElements__button_frame_blue` and the full `UIElements__ButtonFrame` prefab now render
 with correct rounded corners and detail at their real target sizes.
+
+## Week 3 visual result: assembled prefab vs. Figma frame
+
+Side-by-side of the assembled `.prefab` (rendered in the Unity Editor, `Assets/_Generated/UIAssembler/178_35186.prefab`) against the original Figma frame export the pipeline consumed:
+
+| Figma frame (input) | Assembled prefab (output) |
+|---|---|
+| ![Figma frame](../fixtures/frame-export.png) | ![Assembled prefab](../fixtures/assembled-prefab.png) |
+
+Read this as the Week 3 Definition-of-Done receipt, not a pixel-diff metric: every top-level golden element is present at its expected screen position (HUD gem+`100`, "Are you Sure?" title, "You will lose:" subtitle, heart icon, close X, "100" continue button) with the correct sprite from `.cache/catalog.json`, resized via 9-slice/`ppuMultiplier` rather than stretched. The gem sprite itself is absent (`icon_gem` is one of the truly-missing synthetic elements the matcher correctly resolved to `missing` - the assembler skipped it, as designed), and the `Scrim` full-screen dim isn't populated (also correctly `missing` in this catalog). The two remaining visual gaps against the Figma mockup are known and out of scope for this slice: TMP text styling (no structured font/color in `element-tree.json` - see `HANDOFF.md`) and the missing gem/scrim sprites.
+
+**Week 3 Go/No-Go: PASS.** The vertical slice's full thesis - Figma frame → reduced element tree → matcher → assembled Unity prefab - is now demonstrated end-to-end against the real fixture.
+
+## Automated screenshot renderer (session addition)
+
+HANDOFF.md previously flagged a batch-mode pixel-level renderer as "not attempted" - the
+side-by-side above relied on the user manually opening the prefab and capturing a screenshot by
+hand, not a repeatable artifact. `RunScreenshot.cs` (`scripts/screenshot.sh`) closes that gap: it
+builds the identical in-memory hierarchy `RunAssemble.cs` builds (`CanvasScaffold` + `NodeBuilder`,
+reused directly, never re-implemented) but renders it via an orthographic camera into a
+`RenderTexture` sized exactly to `canvas_reference` instead of saving a prefab, using the same
+`ScreenSpaceCamera` + `Canvas.ForceUpdateCanvases()` + synchronous `Camera.Render()` recipe
+`SmokeTest.CaptureCatalogEntryRender` already validated for single catalog entries - applied here to
+the full assembled hierarchy for the first time.
+
+Ran for real against the live fixture (`scripts/screenshot.sh`, no manual Editor interaction):
+
+| Figma frame (input) | Automated render (`RunScreenshot`) |
+|---|---|
+| ![Figma frame](../fixtures/frame-export.png) | ![Automated render](../fixtures/rendered-frame.png) |
+
+Matches the earlier user-captured screenshot element-for-element (title/subtitle text, top HUD bar,
+heart icon, close X, bottom continue button all present and correctly placed/sized) - background is
+deliberately transparent rather than guessing at a fill color, since no scrim/background element is
+a matchable asset in this run's `.cache/match-result.json` (`Scrim` is `missing`). Output size
+(1206×2622) matches `canvas_reference` exactly, confirmed against `frame-export.png`'s own
+1209×2622 `source_frame` size - the ~0.2% width difference is the same near-1.0 scale factor already
+documented in `normalize.ts`'s notes, not a rendering error. This run used `.cache/match-result.json`
+as-is (raw matcher output, pre-human-review promotions), so `icon_glow` (`uncertain`) is correctly
+absent here too, same as `Scrim`/`icon_gem`/`button_share` (`missing`) - re-run against a
+promoted/reviewed match-result.json for a render matching the fully-`matched` prefab state.

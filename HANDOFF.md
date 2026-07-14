@@ -9,10 +9,11 @@ about *state* and *things that aren't obvious from reading the code*.
 below, upgraded after Week 3's real prefab review caught a golden-fixture bug
 and validated 3 `uncertain` promotions). **Week 3 (assembler) implemented and
 verified against the real fixture, including a real live Editor review by the
-user** - see "Week 3: the assembler" below. T3.6 (compiling
-`scoring/report.md`'s Week 3 section proper - the assembled-prefab screenshot
-next to the Figma frame; the go/no-go text itself is already updated) is the
-one remaining item.
+user** - see "Week 3: the assembler" below. **T3.6 DONE**: `scoring/report.md`
+now carries the Week 3 side-by-side of `fixtures/frame-export.png` and
+`fixtures/assembled-prefab.png` (user-captured screenshot of
+`Assets/_Generated/UIAssembler/178_35186.prefab`) with an explicit Week 3
+Go/No-Go: PASS. The vertical slice is complete end-to-end.
 
 Done: T1.1-T1.6, T1.8-T1.12, T2.1-T2.6 (T2.7 - threshold tuning - now also substantially done, see
 below), plus six not-in-the-original-numbering additions across sessions: an orchestrator, an
@@ -619,6 +620,54 @@ as pure local pixel math, no LLM/network call at all.
     (see "What's not done yet") is very likely to move the real numbers more than further threshold
     tuning would at this point.
 
+## Automated screenshot renderer (session addition)
+
+Closes the gap flagged just above ("Still not done": a batch-mode screenshot renderer) - the only
+remaining verification method for the assembled prefab was the user's own manual Editor
+screenshot, not a repeatable artifact. New file
+`packages/unity-editor/Editor/Batch/RunScreenshot.cs` + `scripts/screenshot.sh`.
+
+- Builds the exact same in-memory hierarchy `RunAssemble.cs` builds - `CanvasScaffold` +
+  `NodeBuilder`, reused directly rather than re-implemented, so this renders exactly what the real
+  assembler produces - but never saves it as a prefab asset; it's a throwaway scene object,
+  destroyed after the screenshot is captured.
+- The render recipe (`ScreenSpaceCamera` Canvas + an orthographic camera targeting a
+  `RenderTexture` + `Canvas.ForceUpdateCanvases()` before a synchronous `Camera.Render()`) is not
+  new - it's the exact one `SmokeTest.CaptureCatalogEntryRender` already validated for single
+  catalog entries (see "Thumbnail rendering bug" investigation above). What's new is applying it to
+  the FULL `CanvasScaffold`-built hierarchy instead of one sprite - `CanvasScaffold` always creates
+  a `ScreenSpaceOverlay` Canvas (correct for the real saved prefab), so `RunScreenshot` mutates
+  `renderMode`/`worldCamera` on the returned Canvas afterward, screenshot-only; `CanvasScaffold`
+  itself is untouched.
+- Renders at exactly `canvas_reference` resolution, not an arbitrary device size - deliberate:
+  `NodeBuilder` positions every element via absolute `anchoredPosition`/`sizeDelta` already in
+  `canvas_reference`-space units, which only maps 1:1 to on-screen pixels when `CanvasScaler`'s
+  computed scale factor is exactly 1 - true when the render target's size equals
+  `referenceResolution` exactly (`computeScaleFactor`'s log2 blend collapses to log2(1)=0 on both
+  axes). Orthographic camera with `orthographicSize = h/2` makes 1 world unit = 1 render-target
+  pixel regardless of `planeDistance` (no perspective divide) - same relationship
+  `CaptureCatalogEntryRender` already relies on.
+- Background is transparent by default (`-bgColor` overrides) rather than guessing a fill color -
+  no scrim/background element is a matchable asset in this fixture's catalog, so a transparent
+  render composites cleanly for a side-by-side or overlay diff without assuming one.
+- **Verified end-to-end on the first real run** against the live Melon project (Unity Editor was
+  not already open on it - checked via `ps aux` first, since batch mode fails fast exit 134
+  otherwise): `scripts/screenshot.sh` produced `.cache/rendered-frame.png` (1206×2622, matching
+  `canvas_reference` exactly) with every expected element present and correctly placed/sized (top
+  HUD bar, title/subtitle text, heart icon, close X, bottom continue button) - matches the earlier
+  user-captured Editor screenshot element-for-element. `NodeBuilder`'s own skip-`Debug.LogWarning`s
+  fired correctly for `Scrim`/`icon_gem`/`button_share` (`missing`) and `icon_glow` (`uncertain`) -
+  this run used `.cache/match-result.json` as-is (raw matcher output, pre-human-review promotions),
+  not the promoted state `scoring/report.md`'s Week 3 section describes; re-run against a
+  promoted/reviewed match-result.json for a render matching the fully-`matched` prefab. Saved a copy
+  as `fixtures/rendered-frame.png` (checked in, unlike `.cache/`) and added a new "Automated
+  screenshot renderer" section to `scoring/report.md` with the side-by-side.
+- Not yet built: an actual pixel-diff/SSIM score between this render and `frame-export.png` (this
+  session only proved the renderer itself works and produces a visually-correct artifact) - would
+  need to handle the known, out-of-scope gaps first (no TMP font/color styling data in
+  `element-tree.json`, `Scrim`/gem sprites correctly absent per this run's match results) or the
+  diff would be dominated by things that aren't rendering bugs.
+
 ## Week 3: the assembler (session addition)
 
 Implemented T3.1-T3.5 (`CanvasScaffold.cs`, `NodeBuilder.cs`, `PrefabWriter.cs`,
@@ -735,12 +784,9 @@ for the full account, including the important caveat that this PASS reflects
 the golden-fixture fix + a real human review pass, **not** a matcher
 improvement - the matcher's own raw output for these elements is unchanged.
 
-**Still not done**: a batch-mode screenshot renderer for a pixel-level
-comparison against `fixtures/frame-export.png` (a `ScreenSpaceOverlay` Canvas
-would need flipping to `ScreenSpaceCamera` with a real camera, and forcing
-`CanvasScaler`/`CanvasUpdateRegistry` to run without Play Mode ticking - not
-attempted, flagged as a real unresolved question rather than guessed at). Not
-blocking - the user's own live Editor review already served this purpose.
+~~**Still not done**: a batch-mode screenshot renderer~~ - **RESOLVED in a
+later session**, see "Automated screenshot renderer" below (new
+`RunScreenshot.cs` + `scripts/screenshot.sh`).
 
 ## Second review pass: a real NodeBuilder bug + a corrected prior finding (session addition)
 
@@ -1012,14 +1058,33 @@ pattern to reach for first, rather than re-investigating from scratch.
   `uncertain` results). Rerun `score_gate1.py .cache/element-tree.json` and
   `score_gate2.py .cache/match-result.json` and refresh the numbers in that file if either cache
   artifact changes before this is picked up again.
-- `fetch-frame`/`reduce`/`build-catalog-descriptions` are still not wired into `cli.ts` - not
-  blocking today (golden-elements.json stands in for a produced element-tree.json), but will be
-  needed before this can run on anything other than the fixture.
+- `fetch-frame`/`reduce` are now wired into `cli.ts` as real subcommands: `ui-assembler
+  fetch-frame [--refresh]` (reads `FIGMA_FILE_KEY`/`FIGMA_NODE_ID` from `.env`, cache-first same
+  as `scripts/fetch-figma-frame.mjs`) and `ui-assembler reduce [output.json]` (fetch-frame →
+  parseTree → reduce via the shared agent adapter → normalize → write element-tree.json, default
+  `.cache/element-tree.json`). CanvasScaler config is hardcoded in `cli.ts` to match the fixture
+  (`referenceResolution={1206,2622}`, `matchMode=match_width_or_height`, `matchValue=1`) - same
+  pin `fixtures/golden-elements.json` uses; `source_frame` still comes from the fetched frame's
+  own `absoluteBoundingBox` at runtime. `fetch-frame` verified end-to-end against the cache
+  (`fetched "Lose Screen" (178:35186) -> .cache/figma/.../178-35186.json`); `reduce` typechecks
+  but was not run end-to-end this session to avoid consuming agent-CLI quota - the plumbing is
+  a straight compose of the same three functions `HANDOFF.md`'s Week 1 notes already describe as
+  individually working. `build-catalog-descriptions` (T1.7) is still unwired, still non-blocking.
+  **Verified end-to-end** post-write-up: `ui-assembler reduce` produced 7 elements, wrote
+  `.cache/element-tree.json`, and `score_gate1.py` on that output reproduced the golden Gate 1
+  numbers (recall/precision/hierarchy 100/100/100, PASS). **Real quota cost, worth budgeting for
+  next time**: this one `reduce` run consumed ~35% of the user's 5-hour Claude subscription
+  window - the adapter avoids a metered BILL but not the subscription's rolling usage LIMIT.
+  Don't casually re-run `reduce` (or anything else routed through `src/agent/`) as a
+  verification step; diff against the cached `.cache/element-tree.json` instead.
 - ~~Week 3 (assembler: `CanvasScaffold.cs`, `NodeBuilder.cs`, `PrefabWriter.cs`)~~ -
-  **implemented and run end-to-end this session**, see "Week 3: the assembler"
-  above. Remaining: T3.6 (`scoring/report.md`'s Week 3 section - assembled-prefab
-  screenshot next to the Figma frame, go/no-go write-up) and a live visual
-  open-and-compare of `Assets/_Generated/UIAssembler/178_35186.prefab` in the
-  Unity Editor GUI against `fixtures/frame-export.png` (not done - this agent
-  has no interactive Editor GUI access; verification so far is serialized-data-
-  level, not pixel-level).
+  **implemented and run end-to-end**, see "Week 3: the assembler" above.
+- ~~T3.6 (`scoring/report.md`'s Week 3 section - assembled-prefab screenshot
+  next to the Figma frame, go/no-go write-up)~~ - **DONE**: user captured
+  `fixtures/assembled-prefab.png` from the Unity Editor and it's embedded
+  side-by-side with `fixtures/frame-export.png` in `scoring/report.md`'s new
+  "Week 3 visual result" section, with an explicit Week 3 Go/No-Go: PASS. The
+  live open-and-compare in the Editor was done by the user across multiple
+  review passes (see "Update after Week 3's real prefab review" and "Second
+  review pass" in this file); a batch-mode pixel-diff renderer against
+  `frame-export.png` is still not built, and flagged not-blocking.
