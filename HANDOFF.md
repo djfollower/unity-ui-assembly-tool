@@ -5,7 +5,14 @@ about *state* and *things that aren't obvious from reading the code*.
 
 ## Where things stand
 
-**Gate 1: PASS** (Week 1 complete). **Week 2 in progress** — building the matcher toward Gate 2.
+**Gate 1: PASS** (Week 1 complete). **Gate 2: PASS** (was SOFT PASS - see
+below, upgraded after Week 3's real prefab review caught a golden-fixture bug
+and validated 3 `uncertain` promotions). **Week 3 (assembler) implemented and
+verified against the real fixture, including a real live Editor review by the
+user** - see "Week 3: the assembler" below. T3.6 (compiling
+`scoring/report.md`'s Week 3 section proper - the assembled-prefab screenshot
+next to the Figma frame; the go/no-go text itself is already updated) is the
+one remaining item.
 
 Done: T1.1-T1.6, T1.8-T1.12, T2.1-T2.6 (T2.7 - threshold tuning - now also substantially done, see
 below), plus six not-in-the-original-numbering additions across sessions: an orchestrator, an
@@ -612,6 +619,343 @@ as pure local pixel math, no LLM/network call at all.
     (see "What's not done yet") is very likely to move the real numbers more than further threshold
     tuning would at this point.
 
+## Week 3: the assembler (session addition)
+
+Implemented T3.1-T3.5 (`CanvasScaffold.cs`, `NodeBuilder.cs`, `PrefabWriter.cs`,
+`RunAssemble.cs`, `scripts/assemble.sh`), extending the pre-existing stub files
+(scaffolded in an earlier session, all throwing `NotImplementedException`).
+Two deliberate, user-confirmed design decisions before coding:
+- `CanvasScaffold` reads `canvas_reference`/`canvas_match_mode`/
+  `canvas_match_value` **from `element-tree.json`** (already written there by
+  `normalize.ts`/T1.10, itself hardcoded to match the project's real
+  CanvasScaler setting) - not a second, independent live query into an
+  existing Melon Canvas asset.
+- Default assembled-prefab output path: `Assets/_Generated/UIAssembler/<sanitized-frame_id>.prefab`.
+
+**New file `Editor/Assembler/AssemblerJson.cs`**: a hand-rolled recursive-
+descent JSON parser + typed loaders for `element-tree.json`/`match-result.json`/
+`catalog.json`. Confirmed no Newtonsoft Json.NET in Melon's `Packages/manifest.json`,
+so this continues `RunCatalogBuild.cs`'s existing precedent (hand-rolled JSON,
+since `JsonUtility` can't parse a top-level array or nullable fields) rather
+than adding a new Unity package dependency. Data classes intentionally carry
+only what `NodeBuilder` needs (not every schema field) - border/PPU/native_size/
+thumbnail are irrelevant to assembly since Unity reads 9-slice border straight
+off the assigned `Sprite` asset itself.
+
+**`NodeBuilder.cs`'s key design call**: flat instantiation - every leaf element
+(whether top-level or a composite's child) becomes a **direct sibling** under
+the root Canvas, positioned by its own absolute `canvas_reference`-space rect
+(top-left anchor/pivot, `anchoredPosition=(x,-y)`, `sizeDelta=(w,h)` - no
+relative-position math needed). Grouping containers (elements with non-empty
+`children`, e.g. `button_x`) are walked for traversal only, never instantiated
+themselves - same convention `matcher/match.ts` already established.
+Element-tree array order is preserved depth-first when appending under the
+Canvas, which is already established (see "Composite crop-sharing: RESOLVED"
+above) to be back-to-front, so Unity's sibling-index draw order comes out
+correct with no extra z-ordering logic. Only `match-result.json` entries with
+`status == "matched"` get built; `"uncertain"`/`"missing"` are skipped with a
+`Debug.LogWarning` (matches the stub doc comment's "confirmed match-result.json"
+wording and the Gate 2 report's "mandatory review on uncertain" recommendation).
+`type == "text"` elements never appear in `match-result.json` (the matcher
+already filters them out) - built directly as `TextMeshProUGUI` from
+`text_content`, with TMP autosizing defaults since element-tree carries no
+structured font/color data (text-fit is an explicitly deferred refinement).
+Needed adding a `"Unity.TextMeshPro"` asmdef reference (Melon's manifest
+already has `com.unity.textmeshpro`; the assembly reference just wasn't wired
+up).
+
+**Two real compile bugs found by actually running this against the real Unity
+project** (not caught by review):
+1. `RunAssemble.cs` used `Dictionary<string,string>.GetValueOrDefault` (an
+   extension method needing `using System.Collections.Generic;` in scope)
+   without that using directive, having only fully-qualified the parameter
+   type in one place - `RunCatalogBuild.cs` already used the same call
+   correctly because it already had that using. Fixed by adding the missing
+   `using`.
+2. `scripts/assemble.sh`'s conditional `"${EXTRA_ARGS[@]}"` expansion of a
+   zero-element array under `set -u` on macOS's bundled bash 3.2 throws
+   "unbound variable" (fixed in bash 4.4+, not before) - fixed with the
+   `"${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"` idiom.
+
+**Verified end-to-end against the real fixture stand-ins** (`fixtures/golden-elements.json`
+as `element-tree.json`, the real `.cache/match-result.json` + `.cache/catalog.json`
+from Week 2's topK=10 run): `scripts/assemble.sh` ran clean against the real
+Melon project and wrote `Assets/_Generated/UIAssembler/178_35186.prefab`.
+Skipped (logged) exactly the 7 elements with a non-`matched` status - `Scrim`,
+`icon_glow`, all 3 `button_x_*` composite children, `icon_gem`, `button_share`
+- built exactly the 3 `matched` elements (`icon_heart`, `button_continue`,
+`button_upgrade`) plus the 2 `text` elements (`text_title`, `text_subtitle`).
+Verified by reading the saved prefab's raw YAML (not just "it ran without
+error"): CanvasScaler's `m_ReferenceResolution`/`m_ScreenMatchMode`/
+`m_MatchWidthOrHeight` match `canvas_reference`/`canvas_match_value` exactly;
+every built element's `m_AnchoredPosition`/`m_SizeDelta` match its
+`golden-elements.json` rect exactly (cross-checked `icon_heart` and
+`button_upgrade` by hand - initially looked like a swapped-rect bug from a
+careless ad-hoc debug script, but was a misreading of that script's own
+output, not a real bug); `button_upgrade` (matched to the `ButtonFrameTint`
+**prefab**, not a sprite) came through correctly as a nested `PrefabInstance`
+with its `RectTransform`/name overridden via proper prefab-modification
+records, not a raw copy. One real, structurally-correct-but-worth-noting
+Unity behavior: `PrefabUtility.SaveAsPrefabAsset` renamed the root GameObject
+from `"Canvas"` (as `CanvasScaffold` names it) to match the output filename
+(`178_35186`) - standard Unity semantics (a saved prefab's root name mirrors
+its asset name), not a bug.
+
+**T3.4's live visual review, done by the user (this agent has no interactive
+Editor GUI access) - found one real bug and validated the review policy.**
+Two things the user reported after opening `178_35186.prefab` in the Editor:
+`button_upgrade` sitting oddly at top-left (expected - it's a **synthetic**
+golden element with a fabricated rect, not real mockup content, see "The
+fixture" above) and no X button at all (expected by design - all 3 composite
+children were `uncertain`, and `NodeBuilder` deliberately skips anything not
+`matched`). But the user also confirmed `button_continue`'s matched asset was
+wrong: **`golden-matches.json` itself had the wrong ground truth for this
+element** (`UIElements__button_green` instead of the real correct answer,
+`UIElements__ButtonFrame` - the shared untinted prefab template that
+`ButtonFrameTint` is a tinted variant of, already green in its native color).
+This is the same asset T2.4's `WEIGHT_INSTANCE` tuning decision deliberately
+ranked *down* because it was "wrongly" beating `button_green` - that tuning
+call was chasing a mislabeled golden entry, not a real matcher bug, and the
+prior Gate 2 "0.0% FAR" number was never a true 0% as a result (a false accept
+scoring can't see if the ground truth it diffs against is itself wrong). Fixed
+`golden-matches.json`'s `button_continue` entry, manually promoted the 3
+composite-child `uncertain` entries in `.cache/match-result.json` to `matched`
+after the user confirmed each asset directly (`button_x_frame` →
+`UIElements__button_frame_x`, matching this file's own prior speculation, not
+the matcher's actual `uncertain` pick of `UIElements__button_x`;
+`button_x_base`/`button_x_icon` confirmed correct as-is), and re-ran
+`scripts/assemble.sh` - the rebuilt prefab was verified the same way as
+before (reading the saved prefab's serialized data field-by-field), now
+showing `button_continue` as a `ButtonFrame` `PrefabInstance` and all 3 X
+button layers present in the correct back-to-front order. Re-scored Gate 2
+against the corrected golden fixture: **FAR 0%, auto-accept 85.7% (up from
+42.9%), missing-recall 100%, verdict PASS** (was SOFT PASS) - see
+`scoring/report.md`'s new "Update after Week 3's real prefab review" section
+for the full account, including the important caveat that this PASS reflects
+the golden-fixture fix + a real human review pass, **not** a matcher
+improvement - the matcher's own raw output for these elements is unchanged.
+
+**Still not done**: a batch-mode screenshot renderer for a pixel-level
+comparison against `fixtures/frame-export.png` (a `ScreenSpaceOverlay` Canvas
+would need flipping to `ScreenSpaceCamera` with a real camera, and forcing
+`CanvasScaler`/`CanvasUpdateRegistry` to run without Play Mode ticking - not
+attempted, flagged as a real unresolved question rather than guessed at). Not
+blocking - the user's own live Editor review already served this purpose.
+
+## Second review pass: a real NodeBuilder bug + a corrected prior finding (session addition)
+
+A second round of the user's live Editor review (same rebuilt prefab) found two more real issues -
+one a genuine `NodeBuilder` bug, one a correction to something this file previously stated as fact.
+
+**Bug: prefab catalog entries with a non-flat internal hierarchy weren't being resized correctly.**
+`button_continue`'s matched asset, `UIElements__ButtonFrame`, isn't a flat prefab - its root is a
+decorative outer wrapper (a separate, unprobed sprite), and the actual visible button Image + label
+live on an inner child (`ButtonContinue`) that's center-anchored with its own fixed size, NOT
+stretch-anchored to its parent. This is the exact same GameObject
+`RenderMetadataProbe.ResolveMainImage` already picks out when probing this entry's render metadata
+into `catalog.json` (confirmed by reading `ButtonFrame.prefab`'s raw YAML: the Button's
+`m_TargetGraphic` fileID matches the inner child's Image component exactly, not the root's own
+separate Image). `NodeBuilder.BuildFromPrefab` was only resizing the ROOT's `RectTransform`
+(`PositionRect`), so the inner child - the actual visible content - stayed frozen at its native
+~531x232 size regardless of the element's target rect (838x285), and the user reported this as
+"wrong green image size" + "no round corners" (the outer wrapper's border, unaffected by
+`ppuMultiplier` per Unity's normal 9-slice behavior, looked disproportionately small/square relative
+to a resized-but-visually-empty root once the real content wasn't tracking it). **Fixed**: added
+`NodeBuilder.ResizeMainImageToFill`, which reuses `RenderMetadataProbe.ResolveMainImage` (same method
+that built the catalog entry) to find the actual visible child, stretch-anchors it to fill its parent
+(`anchorMin=(0,0)`, `anchorMax=(1,1)`, zero offsets), and applies the same `ppuMultiplier` R14
+treatment the sprite path already had. Verified by re-reading the saved prefab: the inner
+`ButtonContinue` child's `RectTransform` now carries stretch-anchor overrides instead of staying at
+its native fixed size. **This is a real, generally-applicable gap** - any future catalog entry that's
+a non-flat prefab (decorative wrapper root + a differently-anchored inner content child) would have
+hit the same bug; not specific to `ButtonFrame`.
+
+**Correction: the composite-child rects were NOT actually hand-authored ground truth - they were a
+placeholder, and the real geometry was recoverable all along.** The user reported `icon_x` rendering
+"bigger than the mockup" for `button_x_icon`. Investigating led to a bigger finding than expected:
+this file previously stated (see "Composite elements" above) that "the real Figma layer is a single
+flattened visual with no separate sub-layers to recurse into" and that the 3-way rect decomposition
+was "fixture-only, hand-authored ground truth." **That was wrong.** The Figma plugin export cache
+(`.cache/figma/bvMnEkqW7u3CHT5lGNs3lg/178-35186.json`, populated by the existing figma-plugin flow -
+see "Non-obvious operational facts") already contains `button_x`'s full expanded sub-tree (GROUP/
+RECTANGLE/INSTANCE nodes for the frame, base, and icon layers, each with real
+`absoluteBoundingBox` data) - nobody had actually looked inside that cached JSON for this composite
+before assuming it was flat. Derived and verified the exact coordinate transform against three
+already-known-correct golden elements (`icon_heart`, `button_continue`, and the frame node itself):
+`elementRect = figmaAbsoluteBoundingBox - frameOrigin` where `frameOrigin` is the frame node's own
+`absoluteBoundingBox.{x,y}` - all three matched `golden-elements.json`'s existing values to 2 decimal
+places, confirming `scale == 1.0` exactly for this frame (`canvas_match_value: 1` fully weights
+height, and `source_frame.h` (2622) already equals `canvas_reference.h` (2622), so the scale factor
+collapses to 1 - see `normalize.ts`'s `computeScaleFactor`). Applied the same transform to the 3 real
+sub-nodes and corrected `golden-elements.json`:
+- `button_x_frame`: `{x: 991.18, y: 188.87, w: 120.62, h: 128}` (was `{986.64, 188.87, 128, 128}`)
+- `button_x_base`: `{x: 997.43, y: 194.90, w: 108.12, h: 115.60}` (same "was" as above)
+- `button_x_icon`: `{x: 1013.46, y: 211.58, w: 76.52, h: 76.52}` (was briefly hand-estimated as
+  `{1018.64, 208.07, 64, 64}` per the user's "roughly 50%, centered but a bit upper" description,
+  before the real cache data was found - the real numbers land at ~60% size, confirming the user's
+  visual estimate was directionally right, just not pixel-exact, as expected of an eyeballed guess)
+
+Rebuilt and verified: all 3 elements' `RectTransform`s in the saved prefab now match these exact
+values.
+
+**New helper, built specifically so this class of bug can't recur silently**:
+`packages/mcp-tool/src/figma/node-rect.ts` (`computeNodeRect`) + a new `ui-assembler figma-node-rect
+<figma-node-id> [element-tree.json]` CLI subcommand (`cli.ts`) - given any Figma node id found inside
+an already-cached frame export, prints its rect in `canvas_reference` space using the exact transform
+above. Reuses `parse-tree.ts`'s frame-relative rect math and `normalize.ts`'s `computeScaleFactor`
+directly (not a re-derived copy - the whole point is one path for this transform, not a second one
+that can drift). Reads `FIGMA_FILE_KEY`/`FIGMA_ACCESS_TOKEN` from `.env` and `frame_id`/
+`canvas_reference`/`canvas_match_mode`/`canvas_match_value` from the given element-tree.json (default
+`fixtures/golden-elements.json`) rather than hardcoding them a third time. Verified against all 3
+corrected `button_x` children AND `icon_heart` (a known-good, already-real element) - all four
+outputs matched exactly. **Use this any time a golden-elements.json rect needs to correspond to a
+real Figma node - never hand-type/eyeball one again**, per the user's own conclusion when asked
+"should golden-elements build from Figma?": the WHICH/type/hierarchy judgment calls must stay
+hand-labeled (that's what Gate 1 measures), but a rect for a real node is a mechanical fact and
+should always be pulled through this tool.
+
+**Open architectural question this raises, NOT acted on this session**: if real sub-layer geometry
+for `button_x`'s composite is recoverable from the Figma export after all, `reduce.ts` (or a new
+step) could in principle learn to decompose a component instance into its constituent sprites
+automatically, rather than this being permanently fixture-only hand-authored ground truth (contra
+what "Composite elements" above previously concluded). This needs real design (how would `reduce.ts`
+know WHICH instances to decompose vs. keep flat, and against what signal - layer naming patterns?
+matching sub-layer names against catalog asset names?) - flagging as a real, re-opened question for
+whoever next touches `reduce.ts` or the composite-matching path, not resolved here. The
+`figma_node_id`s for these 3 children were deliberately left as `synthetic:*` (not updated to the
+real discovered node ids like `I178:34527;82:1405`) to avoid silently changing Gate 1 scoring
+semantics (score_gate1.py excludes `synthetic:`-prefixed elements) - that's a separate decision from
+today's rect-accuracy fix and shouldn't be made as a side effect of it.
+
+## button_continue decomposed into 2 real composite children - REVERTED (session addition)
+
+**Superseded later in the same session** - see "UI.Image Sliced-rendering bug: RESOLVED" below for
+the full account of what actually shipped. Kept in full below because the underlying finding (the
+real Figma mockup DOES structurally mirror `ButtonFrame.prefab`'s own
+root/child split) is still true and useful context - only the "so decompose it into 2 separate
+sprite elements" conclusion was wrong. The user's own correction: the project already has
+`UIElements__ButtonFrame`, a prefab TEMPLATE with exactly this frame+main structure built in -
+reconstructing it from 2 independent sprites duplicates what the template already does, and (as the
+next section covers) surfaced a real rendering bug in the process. `button_continue` is back to a
+single element matched to the `ButtonFrame` prefab, same as it was right after the first
+`button_continue` fix earlier in this file.
+
+The "open architectural question" immediately above got answered sooner than expected, and by the
+user directly: they re-exported the Figma frame with 2 new named layers under `button_continue` -
+`button_continue_frame` and `button_continue_main` - specifically so this tool could detect and use
+the decomposition, the same pattern `button_x` already established. Read the updated
+`.cache/figma/bvMnEkqW7u3CHT5lGNs3lg/178-35186.json` and confirmed both real sub-nodes exist with
+real geometry (`button_continue_frame`: full 838x285 footprint; `button_continue_main`: inset to
+826.72x273, a few px margin on each side). Used the new `figma-node-rect` CLI tool (built earlier
+this session, see above) to pull both rects mechanically rather than re-doing the by-hand transform
+a third time.
+
+**Also explains the earlier `ButtonFrame`-prefab-nested-child bug from a different angle**: checked
+which sprite `button_continue_frame`'s real Figma geometry should map to, and found it's
+`UIElements__button_frame_blue` - confirmed by matching sprite GUIDs, this is the EXACT SAME sprite
+asset `ButtonFrame.prefab`'s own root Image already uses internally as its decorative outer layer.
+Likewise `button_continue_main` maps to `UIElements__button_green` - the same sprite
+`ButtonFrame.prefab`'s inner `ButtonContinue` child already uses. So the real Figma mockup's own
+frame/main split mirrors the prefab's own root/child split almost exactly (frame ~838x285 outer vs.
+main ~827x273 inner - only a ~1-2% margin either way) - not a coincidence, the prefab's nested
+structure IS the frame+main composite, just baked into one asset instead of two.
+
+Restructured `golden-elements.json`'s `button_continue` the same way `button_x` is structured: kept
+as a real, Gate-1-scored top-level element (`figma_node_id: "178:34525"` unchanged), with 2
+`synthetic:`-prefixed leaf children carrying the real rects above. Replaced the old single
+`button_continue` entries in `golden-matches.json` and `.cache/match-result.json` with
+`button_continue_frame` → `UIElements__button_frame_blue` and `button_continue_main` →
+`UIElements__button_green` (both plain sprites - the nested-prefab-resize case from the earlier bug
+fix doesn't even apply to this element anymore, since it's no longer matched to the whole
+`ButtonFrame` prefab). Rebuilt and verified: both children's `RectTransform`s in the saved prefab
+match these exact values, sitting as direct siblings in frame-then-main order (correct back-to-front
+draw order). Re-scored Gate 2: FAR 0%, auto-accept **87.5%** (K grew 7→8), missing-recall 100%,
+still PASS - see `scoring/report.md`'s "Second update" section.
+
+**Still open**: whether `button_upgrade` (matched to `UIElements__ButtonFrameTint`, the SAME
+root/child nested structure) should get the same frame+main decomposition. Not done - `button_upgrade`
+is a synthetic top-level element (fabricated for Gate 2 tint testing, doesn't exist in the real
+Figma frame), so there's no real sub-layer geometry to pull for it the way there was for
+`button_continue`/`button_x`. It stays matched as a single element to the whole prefab, relying on
+`NodeBuilder.ResizeMainImageToFill` (the earlier bug fix) to resize its inner child correctly - which
+it does, just without preserving the small frame/main padding the real composite pattern has.
+
+## UI.Image Sliced-rendering bug: RESOLVED (session addition)
+
+The user rejected the `button_continue` decomposition above and pointed at something more basic:
+`button_continue_frame` (rendered via `NodeBuilder.BuildFromSprite`, `UIElements__button_frame_blue`,
+Sliced) showed as a flat, completely unrounded rectangle in the Unity Editor - not a subtle
+proportion issue, a totally flat rect with no border effect visible at all. They also asked directly
+whether this had actually been visually validated before being reported as done - it hadn't (only the
+saved prefab's serialized field values had been checked, never a rendered pixel) - a real gap, called
+out fairly.
+
+**Root cause, found by building a real screenshot-diagnostic tool and comparing rendering paths side
+by side** (`SmokeTest.CaptureCatalogEntryRender` - builds via the exact real `NodeBuilder.BuildFromSprite`/
+`BuildFromPrefab` methods, Screen Space - Camera + Constant Pixel Size Canvas, renders to a
+RenderTexture, writes a PNG; `SmokeTest.CaptureRawTextureDrawTexture` - the control, same border data
+via raw `Graphics.DrawTexture` against the loose texture): **`UnityEngine.UI.Image`'s own built-in
+Sliced-border rendering is broken for this project's sprites** - confirmed real, not a border-math or
+resize-math bug on this repo's side: the SAME sprite, SAME border array, SAME target size (even the
+sprite's own NATIVE 256x256 size, no resize at all) rendered as a flat rectangle via `UI.Image` +
+`Sliced` type, while `Graphics.DrawTexture` against the identical raw texture + identical border ints
+rendered correctly (visible rounded corners, visible cyan outline detail) every time. Ruled out, with
+real evidence rather than assumption, before concluding this:
+- NOT a border-unit conversion bug on our side (`sprite.border`, `pixelsPerUnit`, `pixelsPerUnitMultiplier`,
+  `canvas.referencePixelsPerUnit` all logged and matched expected values exactly).
+- NOT a Canvas/Camera render-target ordering bug (fixed a real but separate ordering issue -
+  assigning `cam.targetTexture` before creating the Canvas, since Screen Space - Camera sizes its own
+  geometry from the camera's target - but this alone didn't fix the flat-rectangle symptom).
+- NOT specific to a resized target (reproduced identically at the sprite's own native 256x256 size,
+  no resize at all - so this isn't a resize/9-slice scaling-math bug on our side either).
+- NOT fixed by `EditorSettings.spritePackerMode = Disabled`, ruling out a simple "atlas packing isn't
+  active in batch mode" theory (though the atlas IS real and active: `sprite.texture` resolves to a
+  4096x4096 `ASTC 6x6`-compressed `SpriteAtlasV2` atlas texture, and the asset's own import settings
+  use `spriteMeshType: Tight`, matching `RenderedThumbnail.cs`'s own years-old comment that Tight mesh
+  type breaks `SpriteRenderer.drawMode = Sliced` - this appears to be the same underlying class of
+  issue, now hit for the first time via `UI.Image` rather than `SpriteRenderer`, since `NodeBuilder` is
+  the first code in this project to actually put a real `UI.Image` on one of these sprites).
+
+**Fix**: don't trust `UI.Image`'s built-in Sliced rendering for these sprites at all. `NodeBuilder`
+now pre-composites Sliced sprites itself via `Graphics.DrawTexture` against the loose source texture
+(literal texture-pixel border ints - the exact convention `RenderedThumbnail.cs`/`render-candidate.ts`
+already established and this session's diagnostic just re-confirmed works), at the element's exact
+target pixel size, then displays the composited result as a plain `Simple`-type sprite
+(`Sprite.Create` off a runtime `Texture2D`). Applied in two places:
+- `NodeBuilder.BuildFromSprite` now takes the element's target rect directly (not just resized after
+  the fact by `PositionRect`) so it can pre-composite at the right size up front.
+- `NodeBuilder.ResizeMainImageToFill` (the nested-prefab-child fix from earlier this session) does the
+  same pre-composite for a prefab's main image when it's Sliced, reusing `entry.Border`/`entry.ImageType`
+  directly since `RenderMetadataProbe.ResolveMainImage` already probed them off this exact child.
+- `CatalogEntryData`/`AssemblerJson.LoadCatalog` gained a `Border` field (previously trimmed as
+  unneeded, back when the plan was "let Unity's own Sliced rendering read border off the Sprite" -
+  no longer true).
+
+**Verified with real renders, not just re-reading code**: `UIElements__button_frame_blue` at 838x285
+(the assembled `button_continue`'s actual target size) now shows correct rounded corners + the cyan
+outline detail; the whole `UIElements__ButtonFrame` PREFAB (root decorative wrapper + inner
+`ButtonContinue` child, both Sliced) renders correctly end to end; `UIElements__button_frame_x` (the
+X button's frame layer, a completely different sprite) also renders correctly at its own target size
+- confirming the fix generalizes, not a one-asset patch. Rebuilt the actual assembled prefab
+end-to-end afterward and re-scored Gate 2: still **PASS** (FAR 0%, auto-accept 85.7%, missing-recall
+100%, K=7 - back to the count from before the reverted decomposition, since `button_continue` is one
+element again).
+
+**`SmokeTest.CaptureCatalogEntryRender`/`CaptureRawTextureDrawTexture`** are left in the codebase as
+reusable diagnostics (same convention as `DumpImageStates`/`DiagnoseThumbnailArtifact`/
+`ProbeDrawTextureBorderSemantics`) - genuinely useful if a similar Image-vs-Sprite-vs-raw-texture
+rendering mismatch shows up on a different asset later. `CaptureCatalogEntryRender` in particular
+directly reuses `NodeBuilder`'s own real methods (`internal`, not `private`, specifically so this
+diagnostic can call them) - it renders exactly what the real assembler builds, not a parallel
+approximation of it.
+
+**Open question, not chased further**: the precise Unity-internal reason `UI.Image`'s Sliced path
+fails for a Tight-mesh-type sprite packed into a compressed `SpriteAtlasV2` atlas wasn't root-caused
+down to Unity's own source - only empirically confirmed as broken and worked around. If this surfaces
+again on a asset NodeBuilder doesn't already cover (e.g. a Tiled-type sprite, none exist in this
+catalog currently), the same `RenderSlicedToTexture` pre-composite approach is the known-working
+pattern to reach for first, rather than re-investigating from scratch.
+
 ## Non-obvious operational facts
 
 - **Figma REST API is capped at 6 requests/month** (free tier) - do not call it repeatedly during
@@ -655,11 +999,14 @@ as pure local pixel math, no LLM/network call at all.
   before/after results. One residual case (`button_x_frame`) remains wrong, but for a different,
   already-understood reason (coarse visual signal can't discriminate two near-identical red
   frames) - not the crop-sharing bug this section was about.
-- T2.7 (threshold tuning) - **substantially done**: thresholds are now tuned against a real
-  topK=10 run on the fixed catalog with the pure-JS visual signal (see above) - `MATCH_VISUAL_
-  THRESHOLD=0.4`, `MISSING_VISUAL_THRESHOLD=0.24`, `MARGIN_THRESHOLD=0.12` in `gate.ts`. Further
-  tuning is likely better spent on the two items above first (they're the actual driver of the
-  current FAIL) rather than more threshold nudging.
+- T2.7 (threshold tuning) - **substantially done, and now lower-priority than it looked**: thresholds
+  are tuned against a real topK=10 run on the fixed catalog with the pure-JS visual signal (see
+  above) - `MATCH_VISUAL_THRESHOLD=0.4`, `MISSING_VISUAL_THRESHOLD=0.24`, `MARGIN_THRESHOLD=0.12` in
+  `gate.ts`. Gate 2 reached a real PASS (see "Week 3: the assembler" below) via golden-fixture
+  correction + human review, not via matcher/threshold changes - the matcher's own raw output for
+  `icon_glow`/`button_x_frame`/`button_continue` is unchanged and would still need this tuning if the
+  goal shifts to raising the AUTOMATED auto-accept rate itself (currently still the same 42.9% the
+  matcher alone produces) rather than relying on human review for the residual cases.
 - ~~T2.8 (Gate 2 readout / go-no-go write-up)~~ - **DONE this session**, see `scoring/report.md`
   (Gate 1 + Gate 2 readout, go/no-go recommendation: proceed to Week 3 behind mandatory review on
   `uncertain` results). Rerun `score_gate1.py .cache/element-tree.json` and
@@ -668,4 +1015,11 @@ as pure local pixel math, no LLM/network call at all.
 - `fetch-frame`/`reduce`/`build-catalog-descriptions` are still not wired into `cli.ts` - not
   blocking today (golden-elements.json stands in for a produced element-tree.json), but will be
   needed before this can run on anything other than the fixture.
-- Week 3 (assembler: `CanvasScaffold.cs`, `NodeBuilder.cs`, `PrefabWriter.cs`).
+- ~~Week 3 (assembler: `CanvasScaffold.cs`, `NodeBuilder.cs`, `PrefabWriter.cs`)~~ -
+  **implemented and run end-to-end this session**, see "Week 3: the assembler"
+  above. Remaining: T3.6 (`scoring/report.md`'s Week 3 section - assembled-prefab
+  screenshot next to the Figma frame, go/no-go write-up) and a live visual
+  open-and-compare of `Assets/_Generated/UIAssembler/178_35186.prefab` in the
+  Unity Editor GUI against `fixtures/frame-export.png` (not done - this agent
+  has no interactive Editor GUI access; verification so far is serialized-data-
+  level, not pixel-level).

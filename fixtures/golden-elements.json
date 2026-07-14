@@ -58,7 +58,7 @@
       "figma_node_id": "178:34525",
       "type": "button",
       "rect": { "x": 193.01, "y": 2169.87, "w": 838, "h": 285 },
-      "visual_description": "green rounded button, label 'Continue' with coin icon and '100' cost",
+      "visual_description": "green rounded button, label 'Continue' with coin icon and '100' cost - matches the project's existing UIElements__ButtonFrame prefab template, which already has this exact frame+main nested structure (see HANDOFF.md); decomposing into 2 separate sprite elements was tried and reverted, use the prefab template instead.",
       "is_component_instance": true,
       "children": []
     },
@@ -74,8 +74,8 @@
           "id": "button_x_frame",
           "figma_node_id": "synthetic:button_x_frame",
           "type": "image",
-          "rect": { "x": 986.64, "y": 188.87, "w": 128, "h": 128 },
-          "visual_description": "red rounded-square button frame/background, tinted at runtime",
+          "rect": { "x": 991.18, "y": 188.87, "w": 120.62, "h": 128 },
+          "visual_description": "red rounded-square button frame/background, tinted at runtime - rect recovered from the real Figma export cache (.cache/figma/bvMnEkqW7u3CHT5lGNs3lg/178-35186.json), node I178:34527;82:1405, not hand-guessed",
           "is_component_instance": false,
           "children": []
         },
@@ -83,8 +83,8 @@
           "id": "button_x_base",
           "figma_node_id": "synthetic:button_x_base",
           "type": "image",
-          "rect": { "x": 986.64, "y": 188.87, "w": 128, "h": 128 },
-          "visual_description": "backing layer stacked beneath the X icon (from the button_x sprite asset - exact visual role unconfirmed, see HANDOFF.md)",
+          "rect": { "x": 997.43, "y": 194.90, "w": 108.12, "h": 115.60 },
+          "visual_description": "backing layer stacked beneath the X icon (from the button_x sprite asset - exact visual role unconfirmed, see HANDOFF.md) - rect recovered from the real Figma export cache, node I178:34527;82:1407, not hand-guessed",
           "is_component_instance": false,
           "children": []
         },
@@ -92,8 +92,8 @@
           "id": "button_x_icon",
           "figma_node_id": "synthetic:button_x_icon",
           "type": "icon",
-          "rect": { "x": 986.64, "y": 188.87, "w": 128, "h": 128 },
-          "visual_description": "white X glyph with red outline, centered on the button",
+          "rect": { "x": 1013.46, "y": 211.58, "w": 76.52, "h": 76.52 },
+          "visual_description": "white X glyph with red outline, centered but shifted slightly above the button's vertical center, about 60% of the button's size - rect recovered from the real Figma export cache, node I178:34527;308:52401, not hand-guessed",
           "is_component_instance": false,
           "children": []
         }

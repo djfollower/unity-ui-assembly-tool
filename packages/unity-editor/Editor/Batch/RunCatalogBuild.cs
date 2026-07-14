@@ -24,7 +24,7 @@ namespace UiAssemblerSlice.Editor.Batch
 
         public static void Run()
         {
-            var args = ParseArgs(Environment.GetCommandLineArgs());
+            var args = BatchArgs.ParseArgs(Environment.GetCommandLineArgs());
             var featureFolder = args.GetValueOrDefault("-featureFolder", "Assets/Textures/UI/UI Elements");
             var outputPath = args.GetValueOrDefault("-outputPath", DefaultOutputPath());
             var feature = SanitizeFeatureName(featureFolder);
@@ -98,19 +98,6 @@ namespace UiAssemblerSlice.Editor.Batch
         {
             var last = featureFolder.TrimEnd('/').Split('/').Last();
             return last.Replace(" ", "");
-        }
-
-        private static Dictionary<string, string> ParseArgs(string[] args)
-        {
-            var result = new Dictionary<string, string>();
-            for (var i = 0; i < args.Length - 1; i++)
-            {
-                if (args[i].StartsWith("-") && !args[i + 1].StartsWith("-"))
-                {
-                    result[args[i]] = args[i + 1];
-                }
-            }
-            return result;
         }
 
         private struct CatalogEntryData

@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using UiAssemblerSlice.Editor.Assembler;
 using UiAssemblerSlice.Editor.Catalog;
 using UnityEditor;
 using UnityEngine;
@@ -266,6 +268,166 @@ namespace UiAssemblerSlice.Editor.Batch
 
             RenderVariant(border, "unscaled-10");
             RenderVariant(border * 5, "scaled-50");
+        }
+
+        /// T3.4/T3.5 validation gap: NodeBuilder's own "verification" up to
+        /// this point only ever read serialized RectTransform/Image field
+        /// values back out of a saved prefab - never an actual rendered
+        /// pixel. That's not the same claim, and it let a real visual bug
+        /// through (a Sliced sprite that renders with visibly flat, un-
+        /// rounded corners at a resized target, despite the RectTransform/
+        /// Image field values all looking individually correct). Reuses
+        /// NodeBuilder.BuildFromSprite/BuildFromPrefab/PositionRect directly
+        /// (not a re-implementation) so this renders exactly what the real
+        /// assembler would build, not a parallel approximation of it.
+        ///
+        /// Usage: Unity -batchmode -projectPath <path> (no -nographics)
+        ///   -executeMethod UiAssemblerSlice.Editor.Batch.SmokeTest.CaptureCatalogEntryRender
+        ///   -entryId <catalog id> -w <target width> -h <target height>
+        ///   -outputPath <png path> [-catalogPath <path>] -quit
+        public static void CaptureCatalogEntryRender()
+        {
+            var args = BatchArgs.ParseArgs(Environment.GetCommandLineArgs());
+            var entryId = args["-entryId"];
+            var w = int.Parse(args.GetValueOrDefault("-w", "256"));
+            var h = int.Parse(args.GetValueOrDefault("-h", "256"));
+            var outputPath = args["-outputPath"];
+            var catalogPath = args.GetValueOrDefault("-catalogPath", Path.GetFullPath(Path.Combine(
+                Application.dataPath, "..", "..", "unity-ui-assembly-tool", ".cache", "catalog.json")));
+
+            var catalog = AssemblerJson.LoadCatalog(catalogPath);
+            var entry = catalog.First(e => e.Id == entryId);
+            var targetRect = new RectData(0, 0, w, h);
+
+            var camGo = new GameObject("Cam", typeof(Camera));
+            var cam = camGo.GetComponent<Camera>();
+            cam.orthographic = true;
+            cam.orthographicSize = h / 2f;
+            cam.nearClipPlane = 0.1f;
+            cam.farClipPlane = 100f;
+            cam.clearFlags = CameraClearFlags.SolidColor;
+            cam.backgroundColor = new Color(0.15f, 0.17f, 0.22f, 1f);
+            cam.aspect = (float)w / h;
+
+            var renderTexture = RenderTexture.GetTemporary(w, h, 24, RenderTextureFormat.ARGB32);
+            var prevActive = RenderTexture.active;
+            try
+            {
+                // Assigning targetTexture before the Canvas below is created
+                // matters: a Screen Space - Camera Canvas sizes its own
+                // screen-space geometry from the camera's actual render
+                // target dimensions.
+                cam.targetTexture = renderTexture;
+
+                var canvasGo = new GameObject("Canvas", typeof(Canvas), typeof(CanvasScaler));
+                var canvas = canvasGo.GetComponent<Canvas>();
+                var scaler = canvasGo.GetComponent<CanvasScaler>();
+                scaler.uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
+                scaler.scaleFactor = 1;
+                canvas.renderMode = RenderMode.ScreenSpaceCamera;
+                canvas.worldCamera = cam;
+                canvas.planeDistance = 10;
+
+                var go = entry.Type == "prefab" ? NodeBuilder.BuildFromPrefab(entry) : NodeBuilder.BuildFromSprite(entry, targetRect);
+                go.transform.SetParent(canvasGo.transform, false);
+                var rt = go.GetComponent<RectTransform>();
+                rt.anchorMin = new Vector2(0.5f, 0.5f);
+                rt.anchorMax = new Vector2(0.5f, 0.5f);
+                rt.pivot = new Vector2(0.5f, 0.5f);
+                rt.anchoredPosition = Vector2.zero;
+                rt.sizeDelta = new Vector2(w, h);
+                if (entry.Type == "prefab") NodeBuilder.ResizeMainImageToFill(go, entry, targetRect);
+
+                // A freshly-created Image's procedural mesh and the Canvas's
+                // own screen-space geometry are normally rebuilt by Canvas's
+                // per-frame update pass - which never runs on its own here,
+                // since nothing is ticking Play Mode or an Editor frame
+                // between creating this UI and calling Camera.Render()
+                // synchronously.
+                Canvas.ForceUpdateCanvases();
+
+                cam.Render();
+
+                RenderTexture.active = renderTexture;
+                var readable = new Texture2D(w, h, TextureFormat.RGBA32, false);
+                readable.ReadPixels(new Rect(0, 0, w, h), 0, 0);
+                readable.Apply();
+                Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ?? ".");
+                File.WriteAllBytes(outputPath, readable.EncodeToPNG());
+                UnityEngine.Object.DestroyImmediate(readable);
+                UnityEngine.Object.DestroyImmediate(canvasGo);
+                Debug.Log($"CaptureCatalogEntryRender: wrote {outputPath} ({w}x{h}, entry={entryId})");
+            }
+            finally
+            {
+                RenderTexture.active = prevActive;
+                cam.targetTexture = null;
+                RenderTexture.ReleaseTemporary(renderTexture);
+                UnityEngine.Object.DestroyImmediate(camGo);
+            }
+        }
+
+        /// Isolates whether CaptureCatalogEntryRender's flat-rectangle bug is
+        /// specific to UI.Image + a packed-SpriteAtlas texture, by rendering
+        /// the SAME catalog entry's border via Graphics.DrawTexture against
+        /// the RAW loose texture (AssetDatabase.LoadAssetAtPath<Texture2D>,
+        /// same call RenderedThumbnail.cs already uses successfully) -
+        /// entirely bypassing Sprite/Image/SpriteAtlas.
+        ///
+        /// Usage: same args as CaptureCatalogEntryRender.
+        public static void CaptureRawTextureDrawTexture()
+        {
+            var args = BatchArgs.ParseArgs(Environment.GetCommandLineArgs());
+            var entryId = args["-entryId"];
+            var w = int.Parse(args.GetValueOrDefault("-w", "256"));
+            var h = int.Parse(args.GetValueOrDefault("-h", "256"));
+            var outputPath = args["-outputPath"];
+            var catalogPath = args.GetValueOrDefault("-catalogPath", Path.GetFullPath(Path.Combine(
+                Application.dataPath, "..", "..", "unity-ui-assembly-tool", ".cache", "catalog.json")));
+
+            var catalog = AssemblerJson.LoadCatalog(catalogPath);
+            var entry = catalog.First(e => e.Id == entryId);
+            var texture = AssetDatabase.LoadAssetAtPath<Texture2D>(entry.Path);
+            Debug.Log($"CaptureRawTextureDrawTexture diag: texture={texture.name} {texture.width}x{texture.height} format={texture.format}");
+
+            // CatalogEntryData doesn't carry border (NodeBuilder doesn't
+            // need it - Unity reads it off the Sprite directly) - parse it
+            // straight from the JSON for this one-off diagnostic instead of
+            // widening the shared data model for a temporary test.
+            var rawCatalog = (System.Collections.Generic.List<object>)JsonParser.Parse(File.ReadAllText(catalogPath));
+            var rawEntry = rawCatalog
+                .Cast<System.Collections.Generic.Dictionary<string, object>>()
+                .First(e => (string)e["id"] == entryId);
+            var rawRender = (System.Collections.Generic.Dictionary<string, object>)rawEntry["render"];
+            var rawBorder = ((System.Collections.Generic.List<object>)rawRender["border"]).Select(b => (float)(double)b).ToArray();
+
+            var rt = RenderTexture.GetTemporary(w, h, 0, RenderTextureFormat.ARGB32);
+            var prevActive = RenderTexture.active;
+            try
+            {
+                RenderTexture.active = rt;
+                GL.Clear(true, true, new Color(0.15f, 0.17f, 0.22f, 1f));
+                GL.PushMatrix();
+                GL.LoadPixelMatrix(0, w, h, 0);
+                // sprite.border order is [left, bottom, right, top];
+                // DrawTexture wants (leftBorder, rightBorder, topBorder, bottomBorder).
+                Graphics.DrawTexture(new Rect(0, 0, w, h), texture, new Rect(0, 0, 1, 1),
+                    (int)rawBorder[0], (int)rawBorder[2], (int)rawBorder[3], (int)rawBorder[1], Color.white);
+                GL.PopMatrix();
+
+                var readable = new Texture2D(w, h, TextureFormat.RGBA32, false);
+                readable.ReadPixels(new Rect(0, 0, w, h), 0, 0);
+                readable.Apply();
+                Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ?? ".");
+                File.WriteAllBytes(outputPath, readable.EncodeToPNG());
+                UnityEngine.Object.DestroyImmediate(readable);
+                Debug.Log($"CaptureRawTextureDrawTexture: wrote {outputPath}");
+            }
+            finally
+            {
+                RenderTexture.active = prevActive;
+                RenderTexture.ReleaseTemporary(rt);
+            }
         }
 
         private static string GetHierarchyPath(Transform t, Transform root)

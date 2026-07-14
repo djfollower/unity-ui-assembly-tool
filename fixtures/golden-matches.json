@@ -20,7 +20,7 @@
   {
     "element_id": "button_continue",
     "status": "matched",
-    "matched_asset_id": "UIElements__button_green",
+    "matched_asset_id": "UIElements__ButtonFrame",
     "signals": { "visual": 1, "structural": 1, "agree": true, "margin": 1 },
     "resize": { "safe": true, "size_delta_to": { "w": 838, "h": 285 } }
   },
