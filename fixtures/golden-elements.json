@@ -69,6 +69,7 @@
       "rect": { "x": 986.64, "y": 188.87, "w": 128, "h": 128 },
       "visual_description": "small red rounded close/X button, top right",
       "is_component_instance": true,
+      "composite": true,
       "children": [
         {
           "id": "button_x_frame",

@@ -54,6 +54,10 @@ export interface Element {
    */
   is_component_instance: boolean;
   children: Element[];
+  /**
+   * True when this element's children are several layers that combine into one visual (e.g. a frame + backing + glyph stacked to form one button), to be scored jointly by the matcher rather than independently. Explicit, not inferred from geometry - composite layers are not guaranteed to share an identical rect. Absent/false means an ordinary layout grouping.
+   */
+  composite?: boolean;
 }
 /**
  * Position/size in canvas_reference space, post-normalization (R3).

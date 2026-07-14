@@ -18,7 +18,6 @@ import { structuralSignal } from "./structural-signal.js";
 import { visualSignal, type VisualSignalOptions } from "./visual-signal.js";
 
 type Element = ElementTree["elements"][number];
-type Rect = Element["rect"];
 
 export interface MatchElementTreeOptions extends VisualSignalOptions {
   topK?: number;
@@ -34,73 +33,75 @@ function isMatchable(element: Element): boolean {
   return element.type !== "text";
 }
 
-// A small epsilon on rect equality, not exact float equality - mirrors
-// gate.ts's RESIZE_EPSILON convention for "close enough to call the same
-// size/position" rather than introducing a second magic number with a
-// different meaning.
-const RECT_EPSILON = 0.5;
-
-function rectsEqual(a: Rect, b: Rect): boolean {
-  return (
-    Math.abs(a.x - b.x) <= RECT_EPSILON &&
-    Math.abs(a.y - b.y) <= RECT_EPSILON &&
-    Math.abs(a.w - b.w) <= RECT_EPSILON &&
-    Math.abs(a.h - b.h) <= RECT_EPSILON
-  );
-}
-
 // The signal that a parent's children are a composite group (see
-// composite-visual-signal.ts) rather than an ordinary layout grouping: they
-// are all stacked at the identical rect, so cropElementFromFrame would
-// return the same crop for every one of them. Ordinary grouping containers
-// (a row/column of distinct sub-elements) have children at DIFFERENT rects,
-// which the normal per-element crop already handles correctly - only the
-// same-rect case needs the joint composite path.
-function isCompositeGroup(children: Element[]): boolean {
-  return children.length > 1 && children.every((child) => rectsEqual(child.rect, children[0].rect));
+// composite-visual-signal.ts) rather than an ordinary layout grouping: an
+// explicit flag (element-tree.schema.json's `composite`), set by whoever
+// authors the tree (originally the hand-labeled golden fixture; the planned
+// Figma-plugin selection UI's "Combine" action going forward), not inferred
+// from geometry. Composite layers are NOT guaranteed to share an identical
+// rect - button_x's real Figma geometry (frame/base/icon, corrected from
+// earlier placeholder identical rects, see HANDOFF.md) turned out to be 3
+// different, nested rects, which silently broke an earlier rect-equality
+// version of this check. Ordinary grouping containers (a row/column of
+// distinct sub-elements) keep the plain per-element path via recursion.
+function isCompositeGroup(element: Element): boolean {
+  return element.composite === true && element.children.length > 1;
 }
 
 // A single Figma node can correspond to more than one catalog asset - one
 // real example: the mockup's "button_x" close button is ONE Figma layer but
-// is actually assembled in Unity from three separate sprites stacked at the
-// same rect (frame + a backing layer + the X icon glyph), discovered while
-// investigating why the matcher couldn't find a single asset that looked
-// right for it. element-tree.schema.json already supports this via
-// `children` (a child is just another full element, recursively) - no
-// schema or signal-function changes needed, candidates()/structuralSignal()/
-// visualSignal()/gate() are all already element-shape-agnostic. What's
-// needed is this: an element WITH children is treated as a pure grouping
-// container and is not matched directly (matching "the whole composite"
-// against one catalog entry doesn't make sense) - only its children
-// (recursively) are matched. A childless element is matched directly, same
-// as before this existed.
+// is actually assembled in Unity from three separate sprites (frame + a
+// backing layer + the X icon glyph), discovered while investigating why the
+// matcher couldn't find a single asset that looked right for it.
+// element-tree.schema.json already supports this via `children` (a child is
+// just another full element, recursively) - no signal-function changes
+// needed, candidates()/structuralSignal()/visualSignal()/gate() are all
+// already element-shape-agnostic. What's needed is this: an element WITH
+// children is treated as a pure grouping container and is not matched
+// directly (matching "the whole composite" against one catalog entry
+// doesn't make sense) - only its children (recursively) are matched. A
+// childless element is matched directly, same as before this existed.
 //
-// Composite children (same-rect, e.g. button_x's three) additionally need
-// JOINT visual scoring, not just independent per-child matching -
-// cropElementFromFrame crops by rect, so all of them get the identical
-// full-composite crop (all layers visible at once), and comparing that
-// against any ONE child's isolated candidate render is comparing a whole
-// picture to one of its layers. isCompositeGroup/compositeVisualSignals
-// (composite-visual-signal.ts) handle this: structuralSignal still runs
-// per-child as normal (text-based, unaffected by the shared crop), but
-// visual scoring composites candidate renders from ALL of a group's
-// children together and compares the WHOLE composite against the shared
-// crop. Ordinary grouping containers (children at different rects) don't
-// have this problem and keep the plain per-element path via recursion.
+// Composite children (marked via the explicit `composite` flag, e.g.
+// button_x's three) additionally need JOINT visual scoring, not just
+// independent per-child matching - cropElementFromFrame crops by rect, so
+// naively all of them would get the identical full-composite crop (all
+// layers visible at once), and comparing that against any ONE child's
+// isolated candidate render is comparing a whole picture to one of its
+// layers. isCompositeGroup/compositeVisualSignals (composite-visual-
+// signal.ts) handle this: structuralSignal still runs per-child as normal
+// (text-based, unaffected by the shared crop), but visual scoring
+// composites candidate renders from ALL of a group's children together and
+// compares the WHOLE composite against the shared crop. Ordinary grouping
+// containers (not flagged composite) don't have this problem and keep the
+// plain per-element path via recursion.
+//
+// KNOWN GAP, not fixed here: compositeVisualSignals still derives its
+// shared crop/target size from children[0].rect alone (composite-visual-
+// signal.ts), i.e. it still implicitly assumes the first child's rect
+// approximates the whole group's bounds. That held by coincidence for
+// button_x's original placeholder rects but no longer holds exactly for its
+// corrected real ones (see HANDOFF.md) - correct today only because the
+// children happen to be concentric/overlapping enough not to visibly break
+// scoring. A composite group whose layers extend in genuinely different
+// directions (not just different sizes) would need that function to crop
+// from the union of all children's rects instead - real follow-on work,
+// out of scope for this change (detection only).
 //
 // This does NOT make reduce.ts itself produce decomposed children for
 // composite templates like this automatically - it doesn't know which
 // Figma component instances need decomposing. That's real, unsolved future
 // work (see HANDOFF.md) - this only makes the matcher correctly handle a
-// tree that already has children populated (as the hand-labeled golden
-// fixture now does for button_x).
+// tree that already has children populated and explicitly flagged (as the
+// hand-labeled golden fixture now does for button_x, and the planned
+// Figma-plugin selection UI's "Combine" action will do going forward).
 type WorkItem = { kind: "single"; element: Element } | { kind: "composite"; children: Element[] };
 
 function collectWorkItems(elements: Element[]): WorkItem[] {
   const result: WorkItem[] = [];
   for (const element of elements) {
     if (element.children.length > 0) {
-      if (isCompositeGroup(element.children)) {
+      if (isCompositeGroup(element)) {
         result.push({ kind: "composite", children: element.children.filter(isMatchable) });
       } else {
         result.push(...collectWorkItems(element.children));
