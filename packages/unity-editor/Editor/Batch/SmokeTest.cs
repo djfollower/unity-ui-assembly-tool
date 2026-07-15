@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using UiAssemblerSlice.Editor.Assembler;
 using UiAssemblerSlice.Editor.Catalog;
+using TMPro;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.UI;
@@ -111,13 +112,130 @@ namespace UiAssemblerSlice.Editor.Batch
             }
         }
 
+        /// Ad-hoc diagnostic: dumps RenderMetadataProbe output for
+        /// ButtonFrame/ButtonFrameTint prefabs (border/native/scale math),
+        /// investigating a reported "split into two boat halves" thumbnail
+        /// artifact.
+        public static void DumpButtonFrameMetadata()
+        {
+            var paths = new[]
+            {
+                "Assets/Prefabs/UI/ButtonFrame.prefab",
+                "Assets/Prefabs/UI/ButtonFrameTint.prefab",
+            };
+            foreach (var path in paths)
+            {
+                var asset = new DiscoveredAsset(path, AssetDatabase.AssetPathToGUID(path), "prefab", Array.Empty<string>());
+                var metadata = RenderMetadataProbe.Probe(asset);
+                var canonicalSize = 256;
+                var scale = Mathf.Min(canonicalSize / metadata.NativeWidth, canonicalSize / metadata.NativeHeight);
+                var w = metadata.NativeWidth * scale;
+                var h = metadata.NativeHeight * scale;
+                Debug.Log($"DumpButtonFrameMetadata [{path}]: imageType={metadata.ImageType} " +
+                          $"border=[{string.Join(",", metadata.Border)}] ppu={metadata.Ppu} " +
+                          $"ppuMultiplier={metadata.PpuMultiplier} native={metadata.NativeWidth}x{metadata.NativeHeight} " +
+                          $"tint={metadata.TintHex ?? "null"} scale={scale} destW={w} destH={h}");
+
+                var go = AssetDatabase.LoadAssetAtPath<GameObject>(path);
+                var image = RenderMetadataProbe.ResolveMainImage(go);
+                Debug.Log($"  ResolveMainImage -> {(image != null ? GetHierarchyPath(image.transform, go.transform) : "null")}, " +
+                          $"sprite={(image?.sprite != null ? image.sprite.name : "null")}, " +
+                          $"spriteRect={(image?.sprite != null ? image.sprite.rect.ToString() : "n/a")}, " +
+                          $"spriteBorder={(image?.sprite != null ? image.sprite.border.ToString() : "n/a")}, " +
+                          $"rectTransformRect={(image != null ? image.rectTransform.rect.ToString() : "n/a")}, " +
+                          $"color={(image != null ? image.color.ToString() : "n/a")}");
+            }
+        }
+
+        /// Ad-hoc diagnostic: what shader/material does ButtonFrame's
+        /// resolved Image actually use, and what does its real (packed
+        /// atlas) texture vs. the loose on-disk texture look like at the
+        /// pixel level, at the sprite's actual border coordinates? Chasing
+        /// why RenderedThumbnail.cs's tint result (dark green/teal) doesn't
+        /// match CaptureCatalogEntryRender's real-UI.Image render (vivid
+        /// blue) for the same #7349FF tint.
+        public static void DumpButtonFrameShaderAndTexture()
+        {
+            const string path = "Assets/Prefabs/UI/ButtonFrame.prefab";
+            var go = AssetDatabase.LoadAssetAtPath<GameObject>(path);
+            var image = RenderMetadataProbe.ResolveMainImage(go);
+            Debug.Log($"DumpButtonFrameShaderAndTexture: material={image.material.name} shader={image.material.shader.name}");
+
+            var spritePath = AssetDatabase.GetAssetPath(image.sprite);
+            var looseTexture = AssetDatabase.LoadAssetAtPath<Texture2D>(spritePath);
+            var atlasTexture = image.sprite.texture;
+            Debug.Log($"  spritePath={spritePath}");
+            Debug.Log($"  looseTexture: {(looseTexture != null ? $"{looseTexture.width}x{looseTexture.height} instanceID={looseTexture.GetInstanceID()} isReadable={looseTexture.isReadable}" : "null")}");
+            Debug.Log($"  sprite.texture (atlas/actual): {(atlasTexture != null ? $"{atlasTexture.width}x{atlasTexture.height} instanceID={atlasTexture.GetInstanceID()} isReadable={atlasTexture.isReadable} name={atlasTexture.name}" : "null")}");
+            Debug.Log($"  sprite.textureRect={image.sprite.textureRect} sprite.rect={image.sprite.rect}");
+
+            if (looseTexture != null && looseTexture.isReadable)
+            {
+                SampleAndLog("loose center", looseTexture, looseTexture.width / 2, looseTexture.height / 2);
+                SampleAndLog("loose corner(10,10)", looseTexture, 10, 10);
+            }
+            if (atlasTexture != null && atlasTexture.isReadable && atlasTexture != looseTexture)
+            {
+                var tr = image.sprite.textureRect;
+                SampleAndLog("atlas center", atlasTexture, (int)(tr.x + tr.width / 2), (int)(tr.y + tr.height / 2));
+            }
+        }
+
+        private static void SampleAndLog(string label, Texture2D tex, int x, int y)
+        {
+            var c = tex.GetPixel(x, y);
+            Debug.Log($"    {label} px({x},{y}) = {c} (r={c.r:F3} g={c.g:F3} b={c.b:F3} a={c.a:F3})");
+        }
+
+        /// Ad-hoc diagnostic: dumps every LayoutGroup/ContentSizeFitter/
+        /// LayoutElement under a prefab, investigating why ButtonFrame's
+        /// icon+text overlap in the thumbnail while ButtonFrameTint's don't.
+        public static void DumpLayoutComponents()
+        {
+            var args = BatchArgs.ParseArgs(Environment.GetCommandLineArgs());
+            var prefabPath = args.GetValueOrDefault("-prefabPath", "Assets/Prefabs/UI/ButtonFrame.prefab");
+            var go = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
+            foreach (var lg in go.GetComponentsInChildren<LayoutGroup>(true))
+            {
+                Debug.Log($"DumpLayoutComponents [{prefabPath}]: LayoutGroup {lg.GetType().Name} on [{GetHierarchyPath(lg.transform, go.transform)}] enabled={lg.enabled}");
+            }
+            foreach (var csf in go.GetComponentsInChildren<ContentSizeFitter>(true))
+            {
+                Debug.Log($"DumpLayoutComponents [{prefabPath}]: ContentSizeFitter on [{GetHierarchyPath(csf.transform, go.transform)}] enabled={csf.enabled}");
+            }
+            foreach (var le in go.GetComponentsInChildren<LayoutElement>(true))
+            {
+                Debug.Log($"DumpLayoutComponents [{prefabPath}]: LayoutElement on [{GetHierarchyPath(le.transform, go.transform)}] enabled={le.enabled}");
+            }
+        }
+
+        /// Ad-hoc diagnostic: dumps every Text/TextMeshProUGUI under
+        /// ButtonFrame.prefab - DumpImageStates only covers Image
+        /// components, and the reported "100" label isn't one.
+        public static void DumpTextStates()
+        {
+            const string prefabPath = "Assets/Prefabs/UI/ButtonFrame.prefab";
+            var go = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
+            foreach (var text in go.GetComponentsInChildren<TextMeshProUGUI>(true))
+            {
+                Debug.Log($"DumpTextStates: TMP [{GetHierarchyPath(text.transform, go.transform)}] activeSelf={text.gameObject.activeSelf} " +
+                          $"text=\"{text.text}\" color={text.color} rect={text.rectTransform.rect} fontSize={text.fontSize}");
+            }
+            foreach (var text in go.GetComponentsInChildren<Text>(true))
+            {
+                Debug.Log($"DumpTextStates: UGUI-Text [{GetHierarchyPath(text.transform, go.transform)}] activeSelf={text.gameObject.activeSelf} " +
+                          $"text=\"{text.text}\" color={text.color} rect={text.rectTransform.rect}");
+            }
+        }
+
         /// Diagnostic: dumps every Image component under a prefab's
         /// hierarchy with its active/enabled/alpha/sprite state, to
         /// understand exactly why ResolveMainImage's visibility filter
         /// rejects a given prefab.
         public static void DumpImageStates()
         {
-            const string prefabPath = "Assets/Prefabs/UI/ButtonFrame.prefab";
+            var args = BatchArgs.ParseArgs(Environment.GetCommandLineArgs());
+            var prefabPath = args.GetValueOrDefault("-prefabPath", "Assets/Prefabs/UI/ButtonFrame.prefab");
             var go = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
             if (go == null)
             {

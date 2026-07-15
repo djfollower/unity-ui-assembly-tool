@@ -433,6 +433,155 @@ matcher run now that the catalog's actual thumbnails are correct - the topK=3 nu
 earlier in this file predate this fix entirely and should not be used to judge threshold tuning.
 (Superseded by the section below - this WAS done, immediately after, in the same overall session.)
 
+## Thumbnail rendering bug, part 2: the border-clamp fix above was still wrong (graduation-phase session)
+
+The "RESOLVED" verification above was real but incomplete - never re-checked against
+`ButtonFrame`/`ButtonFrameTint` specifically. User-reported symptom: both thumbnails visually
+split into two mismatched halves along a horizontal center line ("a boat on the bottom, a smaller
+upside-down boat on top"), and the corner radius, once the shape was fixed, was still roughly 2x
+too large compared to a real Editor screenshot the user supplied.
+
+**Root cause of the split**: `Graphics.DrawTexture`'s border ints are literal, unscaled pixel
+counts used identically for both source-sampling width and destination-draw width - shrinking the
+border pixel count (the prior session's clamp) to fit a too-small destRect **crops** the corner
+artwork mid-curve instead of scaling it. `ButtonFrame`/`ButtonFrameTint` resolve to
+`border=[left:90, bottom:147, right:83, top:82]` on a 256x256 source, native size 531.4x232.1 -> a
+256x111.8 destRect at canonicalSize=256 - vertical border sum 229px against a 111.8px-tall
+destRect, clamped to ~72/~40, cropping the bottom corner's sampled region to less than half its
+real curve.
+
+**Two dead-end fix attempts, in order** (each ruled out with real evidence):
+1. Real `Canvas`/`Camera`/`UnityEngine.UI.Image` render (isolating a single synthetic `Image`
+   instead of instantiating the whole prefab) - shape came out correct-looking at first glance but
+   the corner radius was roughly 2x too large vs. a real Editor screenshot the user supplied.
+   Root cause: `Image` border thickness is an *absolute* pixel value (from
+   `spritePixelsPerUnit`/canvas `referencePixelsPerUnit`/`ppuMultiplier`), independent of the
+   `RectTransform`'s own size - shrinking the `RectTransform` to fit the canonical frame (as a
+   first fix attempt did) leaves the border unchanged, so it eats a much bigger fraction of the
+   now-smaller rect. Compensating by zooming the camera out instead (keeping the `Image` at native
+   size) hit a *second*, separate wall: `NodeBuilder.RenderSlicedToTexture`'s own comment records
+   that `UnityEngine.UI.Image`'s *built-in* Sliced mesh generation is independently broken for
+   these specific sprites (Tight mesh type + packed SpriteAtlasV2) once resized away from native
+   size - a real, previously-confirmed bug in Image itself, not something a camera trick can route
+   around. Abandoned entirely; real `UI.Image` Sliced rendering cannot be trusted for this
+   project's assets at all.
+2. `Graphics.DrawTexture` with the border clamp simply removed (unclamped, matching
+   `NodeBuilder.RenderSlicedToTexture`'s own convention exactly) - still rendered corrupted/cropped
+   (only one corner visible, opposite edges flat) for `ButtonFrame`/`ButtonFrameTint` specifically.
+   Root cause: `RenderSlicedToTexture` is only ever called by the real assembler with target sizes
+   close to the sprite's own proportions (Figma-matched rects), so it never actually exercises the
+   border-sum-exceeds-target-size case - unclamped `DrawTexture` genuinely cannot render correctly
+   once a border's sum on an axis exceeds the destination size on that axis, confirmed empirically
+   here (not fixed by clamping OR not clamping - the destination is fundamentally too small for
+   literal, unscaled border pixels regardless).
+
+**The actual fix**: border pixel counts are only valid relative to the sprite's own *native* pixel
+size (that's what they were authored against in the Sprite Editor) - so never composite a Sliced
+sprite at any size smaller than native. When downscaling (`scale < 1`), composite once at native
+size first (`CompositeAtSize`, unclamped `Graphics.DrawTexture`, same call `RenderSlicedToTexture`
+already uses successfully) - guaranteed non-degenerate, since the border was designed against
+exactly that size - then bilinear-resample the *finished bitmap* down to the target size
+(`ResampleBilinear`, a plain `Graphics.Blit`, no border logic at all) before centering it into the
+canonical square canvas. Upscale/no-scale (`scale >= 1`) still composites directly at the target
+size, unchanged from the already-verified upscale behavior above.
+
+**Verified**: rebuilt the catalog; `ButtonFrame`/`ButtonFrameTint` now render as clean rounded
+rectangles with a correct, modest corner radius matching the user's real-Editor screenshot, and a
+tint color the user confirmed looks right. Spot-checked `button_frame_blue`/`icon_heart` (no
+regression) plus the two most extreme downscale cases in the whole catalog,
+`playcontainer_rectangle` (scale 0.197) and `ui_gamescreen_countertop` (scale 0.25) - both render
+as clean single shapes, no seams. **Not done**: a full contact-sheet re-review of all 65 catalog
+entries (two previous sessions each claimed this kind of verification and still missed a real bug)
+- worth doing before trusting this for Gate 2 tuning again. Diagnostic additions this session, left
+in `SmokeTest.cs` per this file's usual convention: `DumpButtonFrameMetadata` (border/native/scale
+math dump), `DumpButtonFrameShaderAndTexture` (material/shader/texture-identity dump).
+
+## Thumbnail rendering bug, part 3: prefab thumbnails only showed the "main image" (same session)
+
+Follow-up user report, same conversation: `ButtonFrame`'s thumbnail (now shape/color-correct)
+still only showed the green button - missing the larger blue frame Image behind it, a white
+icon-placeholder Image, and a "100" TMP label, all of which are real, active parts of the prefab
+and visible in a real Editor screenshot. Root cause: `RenderedThumbnail.cs`'s prefab path only ever
+rendered `RenderMetadataProbe.ResolveMainImage`'s single result - correct for *matching* (scoring
+needs one representative image) but not for a *thumbnail*, which should show the whole asset.
+
+**Fix**: added `RenderPrefabHierarchy`, which instantiates the prefab for real
+(`PrefabUtility.InstantiatePrefab`, same as `NodeBuilder.BuildFromPrefab`) and renders every
+active/enabled/visible `Image` and `Text`/TMP in it through a real Canvas + Camera, so z-order,
+relative positions, and text all come from Unity's own UI layout rather than being
+reimplemented. Each contributing *Sliced* `Image`'s sprite is swapped for a pre-composited Simple
+one at its own authored rect size first (same `CompositeAtSize` from part 2, same swap-before-
+render recipe `NodeBuilder.ResizeMainImageToFill` already uses for the single-image case) - Simple
+Images and Text are left alone and render natively, since only `UI.Image`'s Sliced path is
+confirmed broken for this project's assets.
+
+**Real bug found while building this**: the prefab root's overall size (used to size the camera/
+canvas around the whole composite) was read from `RectTransform.rect` *after* forcing the root's
+anchors to a fixed center point for framing purposes - for a stretch-anchored root (`Scrim`,
+designed to fill whatever screen it's placed in - `anchorMin != anchorMax`), flipping to fixed-
+point anchors changes what `rect.size` even means (it becomes `sizeDelta` directly, discarding
+whatever size the stretch used to resolve to). This wasn't merely "sometimes reads as 0" - the
+initial stretch-resolved read against our synthetic canvas's own arbitrary default 100x100
+`RectTransform` size looked like a plausible, non-zero, "native" size (100x100) and silently passed
+a naive `width < 1` degeneracy check, while `Scrim`'s *real* authored size is 512x512 - so `Scrim`
+rendered as a fully transparent 100x100 image (correct data, wrong scale) rather than anything
+obviously broken. Fixed by detecting stretch directly from the anchors (`anchorMin != anchorMax`)
+rather than inferring it from the resolved rect, falling back to the already-resolved
+`RenderMetadataProbe` `NativeWidth`/`NativeHeight` (matching `ProbePrefab`'s own documented
+fallback for this exact case) whenever the root was stretch-anchored, and always explicitly
+re-assigning `sizeDelta` after the anchor change rather than only in the (unreliable) "degenerate"
+branch.
+
+**Verified**: rebuilt the catalog; `ButtonFrame`/`ButtonFrameTint` thumbnails now show the full
+composite (frame + button + icon placeholder + "100" label) matching a real Editor screenshot.
+`Scrim` (the stretch-anchored case) now renders as a solid, correctly-sized, correctly-tinted
+512x512 fill (confirmed via direct pixel sampling, not just visual inspection - a Read-tool preview
+of a transparent PNG can look identical to "nothing rendered"). Spot-checked
+`button_frame_blue`/`icon_heart` (bare sprites, unaffected by the prefab-path change) - no
+regression. `RenderMetadataProbe.ResolveMainImage` is untouched and still used for matching/
+scoring - this only changes what the *thumbnail* renders, not what candidate matching scores
+against.
+
+## Thumbnail rendering bug, part 4: Layout Group children never got a layout pass (same session)
+
+Immediate follow-up: `ButtonFrame`'s icon placeholder rendered centered on/behind the "100" label
+instead of beside it, while `ButtonFrameTint` - built from the identical component setup - rendered
+correctly. User correctly guessed the mechanism unprompted: a Layout Group needing a forced update.
+
+Confirmed via a new diagnostic (`SmokeTest.DumpLayoutComponents`): both prefabs have the exact same
+`HorizontalLayoutGroup` (on `ButtonContinue`) + `ContentSizeFitter` (on the TMP label) +
+`LayoutElement` (on the inactive-state sibling) - so the bug isn't a structural difference between
+the two prefabs. Root cause: a Layout Group only repositions its children on an actual layout pass,
+which normally runs lazily (next UI update / next time something marks it dirty), not synchronously
+on `PrefabUtility.InstantiatePrefab`. Absent a forced pass, whatever `anchoredPosition` happens to
+already be serialized in the prefab file is what renders - `ButtonFrameTint`'s serialized icon
+position happened to already match a rebuilt layout (last saved in the Editor after a layout pass
+ran), `ButtonFrame`'s didn't (serialized from before the layout group was added, or before its last
+edit ran one) - coincidence, not a real difference in correctness between the two assets.
+
+**Fix**: one line, `LayoutRebuilder.ForceRebuildLayoutImmediate(rootRt)` in `RenderPrefabHierarchy`,
+called after the Sliced-sprite swap and before the camera/canvas render - recursively rebuilds every
+nested Layout Group/ContentSizeFitter under the prefab root regardless of what was serialized.
+
+**Verified**: rebuilt the catalog; `ButtonFrame`/`ButtonFrameTint` now render identically (icon and
+"100" label side by side in both). Spot-checked `Scrim` (pixel-sampled, still correct navy fill),
+`button_frame_blue`/`icon_heart` (bare sprites, no Layout Group, unaffected) - no regression.
+Diagnostic addition this session: `SmokeTest.DumpLayoutComponents`.
+
+## Full contact-sheet review of all 65 catalog entries: DONE (same session)
+
+Parts 2/3 above each said "not done" for this - actually done now, after part 4's fix. Built two
+labeled contact-sheet PNGs (all 65 thumbnails, sorted by id) directly from `catalog.json`'s baked
+`thumbnail` fields and reviewed both visually: zero seam/boat-split artifacts, zero corner
+distortion, every rounded shape a single clean silhouette. Also ran a systematic per-entry alpha-
+coverage check (not just visual spot-checks) - zero entries render as accidentally-fully-transparent
+(the `Scrim`-style "looks blank but is actually correct low-alpha data" trap from part 3 is fully
+gone; this check would have caught a repeat). 4 entries are fully opaque edge-to-edge by design, not
+bugs: `Scrim` (a full-screen dimming overlay), `ui_bar_flat`/`ui_box`/`ui_string` (plain rectangular
+backer/placeholder art - consistent with the "plausibly legitimate untinted placeholder" note from
+the original "Thumbnail rendering bug: RESOLVED" session). Confidence in the catalog is now real,
+not just claimed - safe to move on to Gate 2 tuning against it.
+
 ## Composite crop-sharing: RESOLVED (session addition)
 
 The gap flagged in "What's not done yet" as unfixed: `button_x_frame`/`button_x_base`/
