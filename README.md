@@ -2,9 +2,10 @@
 
 Unity UI Assembly Tool: Mockup to Prefab
 
-Currently building the three-week vertical slice: prove the pipeline (Figma frame -> reduced
-element tree -> matched against a Unity asset catalog -> assembled prefab) on one real screen,
-against two accuracy gates, before committing to the full system.
+A vertical slice proving the pipeline (Figma frame -> reduced element tree -> matched against a
+Unity asset catalog -> assembled prefab) on one real screen, against two accuracy gates, before
+committing to the full system. The three-week slice is now complete end-to-end - see "Status"
+below.
 
 ## Layout
 
@@ -74,30 +75,79 @@ default to omitting `-nographics` for consistency:
 Only one Unity instance can hold a project open at a time - batch mode fails fast (exit 134) if the
 Editor is already open on that project.
 
+## Full flow (Figma frame -> assembled prefab)
+
+Four stages, each handing off through a JSON file in `.cache/` (or `Assets/_Generated/` for the
+final prefab) - no stage calls another directly. Run them in order:
+
+**1. Build the Unity asset catalog** (only needs re-running when the target project's UI art
+changes):
+
+```
+scripts/build-catalog.sh
+```
+
+Runs Unity in `-batchmode` against the target project (`PROJECT_PATH`, default `/Users/dungphan/Melon`),
+discovering every sprite/prefab in the feature folder plus any `-extraPrefabPaths`, probing each
+one's render metadata (`RenderMetadataProbe`), and rendering a canonical thumbnail for each
+(`RenderedThumbnail`) - see that file's doc comment for why thumbnails go through a real
+Canvas/Camera render rather than a hand-rolled compositor. Writes `.cache/catalog.json`.
+
+**2. Capture the Figma frame and reduce it to an element tree**:
+
+```
+npm run cli --workspace=@ui-assembler-slice/mcp-tool -- reduce
+```
+
+Reads `FIGMA_FILE_KEY`/`FIGMA_NODE_ID` from `.env`, pulls the frame (from the Figma-plugin cache
+first, see "Figma access" above), parses it into a raw layer tree, reduces it via the agent
+adapter (drops decorative noise, names/types the surviving elements), and normalizes it to
+`.cache/element-tree.json`. If you're working from the Figma plugin's exported selection instead
+of a live frame fetch, use `reduce-from-selection <plugin-export.json>` instead - deterministic,
+no agent call, no network.
+
+**3. Match the element tree against the catalog**:
+
+```
+npm run cli --workspace=@ui-assembler-slice/mcp-tool -- match .cache/element-tree.json .cache/catalog.json
+```
+
+Tiered candidate retrieval (`candidates.ts`) -> structural + visual scoring signals -> an
+auto-accept/reject gate (`gate.ts`), recursing into composite elements' children. Writes
+`.cache/match-result.json` (each element tagged `matched` / `uncertain` / `missing`).
+
+**4. Assemble the prefab in Unity**:
+
+```
+"/Applications/Unity/Hub/Editor/<version>/Unity.app/Contents/MacOS/Unity" \
+  -batchmode -projectPath <path-to-target-project> \
+  -executeMethod UiAssemblerSlice.Editor.Batch.RunAssemble.Run \
+  -elementTreePath <path>/.cache/element-tree.json \
+  -matchResultPath <path>/.cache/match-result.json \
+  -quit -logFile <path>
+```
+
+`CanvasScaffold` builds the root Canvas from the element tree's `canvas_reference` config,
+`NodeBuilder` recursively builds each matched element (resizing/re-slicing catalog assets to fit,
+applying tints, laying out text), `PrefabWriter` saves the result. Defaults to
+`Assets/_Generated/UIAssembler/<frameId>.prefab` (`:` sanitized to `_`) unless `-outputPath` is
+given.
+
+**Scoring against fixtures** (validates the pipeline, not required for a normal run):
+
+```
+python3 scoring/score_gate1.py .cache/element-tree.json      # element recall/precision/hierarchy
+python3 scoring/score_gate2.py .cache/match-result.json       # FAR, auto-accept rate, missing-recall
+```
+
 ## Status
 
-**Week 1 complete - Gate 1: PASS.** 3 official runs of the full parse -> reduce -> normalize
-pipeline against the real "Lose Screen" fixture, scored against `fixtures/golden-elements.json`
-(7 elements) via `scoring/score_gate1.py`: 2/3 PASS (100% recall/precision/hierarchy), 1/3 SOFT
-PASS (85.7% recall - missed only `icon_glow`, a genuinely ambiguous glow-effect layer).
-Precision and hierarchy were 100% in all 3 runs - zero false-positive noise, zero mis-parenting.
-Clear to proceed to Week 2 (matcher, Gate 2) per the spec's fail-path gating.
-
-Done: T1.1-T1.6, T1.8-T1.12. T1.7 (LLM catalog descriptions) skipped for now - not on Gate 1's
-critical path.
-
-**Week 2, started.** T2.1 done: `fixtures/golden-matches.json` (8 entries - 5 matched, 3 missing).
-All 4 Gate 2 fixture requirements covered: 9-sliced, tinted (`UIElements__ButtonFrameTint`,
-`#7349FF` - a real hand-made tinted prefab variant), differently-sized-template, and
-missing-recall (3 cases). `RenderMetadataProbe.cs`/`RenderedThumbnail.cs` extended to support
-prefab catalog assets, not just bare sprites - see task history for the real bugs caught along
-the way: wrong Image resolution on composite prefabs, degenerate stretch-anchor sizing, unscaled
-border corruption at non-1 render scale, disabled-state sibling images being incorrectly
-included, and `GameObject.activeInHierarchy` being unreliable for un-instantiated prefab assets
-(always false, even when active - see `RenderMetadataProbe.IsActiveUpToRoot`). Catalog now 65
-entries. `SmokeTest.DumpImageStates` added as a reusable diagnostic for inspecting a prefab's
-Image component states. See the implementation plan's
-day-by-day task breakdown for what's next (T2.2 candidates.ts).
+The vertical slice is **complete end-to-end**: Gate 1 PASS, Gate 2 PASS (see `scoring/report.md`
+for the full readout and go/no-go), and the Week 3 assembler produces a real `.prefab` from the
+"Lose Screen" fixture, reviewed live in the Editor against the Figma mockup by the user. See
+`HANDOFF.md` for the current state in detail - what's been fixed, what's still open, and the
+non-obvious operational facts (Figma quota, agent-adapter cost, Unity rendering gotchas) that
+aren't obvious from the code alone.
 
 Fixture in use: Melon project, frame "Lose Screen" (`178:35186`), feature folder
 `Assets/Textures/UI/UI Elements` (62 sprites) plus 3 explicit extra prefabs (`ButtonFrame`,
