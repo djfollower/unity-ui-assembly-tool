@@ -70,6 +70,7 @@
       "visual_description": "small red rounded close/X button, top right",
       "is_component_instance": true,
       "composite": true,
+      "container": true,
       "children": [
         {
           "id": "button_x_frame",

@@ -16,6 +16,13 @@ export interface IntermediateNode {
   textContent?: string;
   hasEffects: boolean;
   effectTypes: string[];
+  // Carried through unchanged from FigmaNode when present (figma-plugin/
+  // exports only - see reduce-from-selection.ts, the consumer of these).
+  // parseTree stays pure/mechanical either way - it doesn't interpret them.
+  selected?: boolean;
+  typeTag?: string;
+  compositeGroupId?: string;
+  thumbnail?: string;
   children: IntermediateNode[];
 }
 
@@ -46,6 +53,10 @@ function mapNode(
     textContent: node.type === "TEXT" ? node.characters : undefined,
     hasEffects: effects.length > 0,
     effectTypes: effects.map((e) => e.type),
+    selected: node.selected,
+    typeTag: node.typeTag,
+    compositeGroupId: node.compositeGroupId,
+    thumbnail: node.thumbnail,
     children: (node.children ?? []).map((child) => mapNode(child, origin)),
   };
 }

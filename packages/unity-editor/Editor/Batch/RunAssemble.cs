@@ -58,7 +58,10 @@ namespace UiAssemblerSlice.Editor.Batch
         // Deliberately a Unity-project-relative "Assets/..." path, not an OS
         // path - PrefabWriter saves it via AssetDatabase/PrefabUtility,
         // which require project-relative paths.
-        private static string DefaultOutputPath(string frameId)
+        // internal, not private: ReviewWindow (Editor/Review/) reuses this
+        // exact same Assets/... path logic for its in-process "Save &
+        // Assemble" action, rather than re-deriving it a second time.
+        internal static string DefaultOutputPath(string frameId)
         {
             var sanitized = frameId.Replace(':', '_');
             return $"Assets/_Generated/UIAssembler/{sanitized}.prefab";

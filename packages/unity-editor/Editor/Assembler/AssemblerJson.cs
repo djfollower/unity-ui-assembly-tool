@@ -195,15 +195,129 @@ namespace UiAssemblerSlice.Editor.Assembler
         }
     }
 
+    /// The encode half of JsonParser above - needed because ReviewWindow has
+    /// to write a schema-valid match-result.json back to disk after a human
+    /// review edit, not just read one. Same hand-rolled convention (no
+    /// Newtonsoft dependency), 2-space pretty-printed to match cli.ts's own
+    /// JSON.stringify(x, null, 2) output so on-disk diffs stay readable.
+    internal static class JsonWriter
+    {
+        public static string Write(object value)
+        {
+            var sb = new StringBuilder();
+            WriteValue(sb, value, 0);
+            return sb.ToString();
+        }
+
+        private static void WriteValue(StringBuilder sb, object value, int indent)
+        {
+            switch (value)
+            {
+                case null:
+                    sb.Append("null");
+                    break;
+                case bool b:
+                    sb.Append(b ? "true" : "false");
+                    break;
+                case double d:
+                    sb.Append(d.ToString("R", CultureInfo.InvariantCulture));
+                    break;
+                case string s:
+                    WriteString(sb, s);
+                    break;
+                case Dictionary<string, object> obj:
+                    WriteObject(sb, obj, indent);
+                    break;
+                case List<object> arr:
+                    WriteArray(sb, arr, indent);
+                    break;
+                default:
+                    throw new FormatException($"JsonWriter: unsupported value type {value.GetType()}");
+            }
+        }
+
+        private static void WriteObject(StringBuilder sb, Dictionary<string, object> obj, int indent)
+        {
+            if (obj.Count == 0)
+            {
+                sb.Append("{}");
+                return;
+            }
+            sb.Append("{\n");
+            var i = 0;
+            foreach (var kvp in obj)
+            {
+                Indent(sb, indent + 1);
+                WriteString(sb, kvp.Key);
+                sb.Append(": ");
+                WriteValue(sb, kvp.Value, indent + 1);
+                if (++i < obj.Count) sb.Append(',');
+                sb.Append('\n');
+            }
+            Indent(sb, indent);
+            sb.Append('}');
+        }
+
+        private static void WriteArray(StringBuilder sb, List<object> arr, int indent)
+        {
+            if (arr.Count == 0)
+            {
+                sb.Append("[]");
+                return;
+            }
+            sb.Append("[\n");
+            for (var i = 0; i < arr.Count; i++)
+            {
+                Indent(sb, indent + 1);
+                WriteValue(sb, arr[i], indent + 1);
+                if (i < arr.Count - 1) sb.Append(',');
+                sb.Append('\n');
+            }
+            Indent(sb, indent);
+            sb.Append(']');
+        }
+
+        private static void WriteString(StringBuilder sb, string s)
+        {
+            sb.Append('"');
+            foreach (var c in s)
+            {
+                switch (c)
+                {
+                    case '"': sb.Append("\\\""); break;
+                    case '\\': sb.Append("\\\\"); break;
+                    case '\b': sb.Append("\\b"); break;
+                    case '\f': sb.Append("\\f"); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    default:
+                        if (c < 0x20) sb.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+                        else sb.Append(c);
+                        break;
+                }
+            }
+            sb.Append('"');
+        }
+
+        private static void Indent(StringBuilder sb, int level)
+        {
+            sb.Append(' ', level * 2);
+        }
+    }
+
     /// One element from element-tree.json - only the fields NodeBuilder
-    /// actually consumes (visual_description, figma_node_id etc. are
-    /// irrelevant to assembly).
+    /// actually consumes, plus FigmaNodeId (irrelevant to assembly itself,
+    /// carried through purely so the review window can join a match-result
+    /// row back to its Stage 1 preview thumbnail).
     public class ElementData
     {
         public string Id;
         public string Type;
+        public string FigmaNodeId; // joins against element-thumbnails.json for the review window
         public RectData Rect;
         public string TextContent; // null if absent
+        public bool Container; // true: build children as real nested GameObjects, not flattened
         public List<ElementData> Children = new List<ElementData>();
     }
 
@@ -246,6 +360,14 @@ namespace UiAssemblerSlice.Editor.Assembler
         public string ElementId;
         public string Status; // matched | uncertain | missing
         public string MatchedAssetId; // null when status is missing
+        // NodeBuilder never reads either of these - round-tripped verbatim
+        // (parsed Dictionary<string,object> / null) purely so the review
+        // window can write schema-valid JSON back to disk after an edit
+        // ("signals" is required, additionalProperties: false on the whole
+        // entry). Understood to go stale after a human accept/reject/
+        // reassign - see ReviewWindow's own comment on that tradeoff.
+        public object RawSignals;
+        public object RawResize;
     }
 
     /// One entry from catalog.json - ppu/native_size/thumbnail aren't needed
@@ -267,6 +389,7 @@ namespace UiAssemblerSlice.Editor.Assembler
         public float PpuMultiplier;
         public float[] Border; // [left, bottom, right, top], texture pixels; null for Simple entries
         public string TintHex; // null if untinted
+        public string Thumbnail; // base64 "data:image/png;base64,..." - review-window preview only
     }
 
     public static class AssemblerJson
@@ -298,12 +421,14 @@ namespace UiAssemblerSlice.Editor.Assembler
                 {
                     Id = (string)obj["id"],
                     Type = (string)obj["type"],
+                    FigmaNodeId = obj.TryGetValue("figma_node_id", out var fid) ? fid as string : null,
                     Rect = new RectData(
                         (float)(double)rect["x"],
                         (float)(double)rect["y"],
                         (float)(double)rect["w"],
                         (float)(double)rect["h"]),
                     TextContent = obj.TryGetValue("text_content", out var text) ? (string)text : null,
+                    Container = obj.TryGetValue("container", out var containerVal) && containerVal is bool containerBool && containerBool,
                     Children = ParseElements((List<object>)obj["children"]),
                 });
             }
@@ -322,6 +447,8 @@ namespace UiAssemblerSlice.Editor.Assembler
                     ElementId = (string)obj["element_id"],
                     Status = (string)obj["status"],
                     MatchedAssetId = obj.TryGetValue("matched_asset_id", out var id) ? id as string : null,
+                    RawSignals = obj.TryGetValue("signals", out var signals) ? signals : null,
+                    RawResize = obj.TryGetValue("resize", out var resize) ? resize : null,
                 });
             }
             return result;
@@ -344,9 +471,50 @@ namespace UiAssemblerSlice.Editor.Assembler
                     PpuMultiplier = (float)(double)render["ppu_multiplier"],
                     Border = ((List<object>)render["border"]).Select(b => (float)(double)b).ToArray(),
                     TintHex = render.TryGetValue("tint", out var tint) ? tint as string : null,
+                    Thumbnail = (string)obj["thumbnail"], // top-level sibling of "render", required
                 });
             }
             return result;
+        }
+
+        // element-thumbnails.json: a flat { figmaNodeId: base64DataUri }
+        // sidecar written by `ui-assembler reduce-from-selection`, not part
+        // of any schema (deliberately - review-UI concern, not something
+        // match.ts/NodeBuilder.cs need to know about).
+        public static Dictionary<string, string> LoadElementThumbnails(string path)
+        {
+            var root = (Dictionary<string, object>)JsonParser.Parse(File.ReadAllText(path));
+            var result = new Dictionary<string, string>();
+            foreach (var kvp in root) result[kvp.Key] = kvp.Value as string;
+            return result;
+        }
+
+        // Writes back match-result.json after a human review edit
+        // (accept/reject/reassign) - schema-valid (signals required on
+        // every entry, resize omitted rather than null since the schema
+        // marks it optional, not nullable).
+        public static void WriteMatchResults(List<MatchResultEntry> entries, string path)
+        {
+            var arr = new List<object>();
+            foreach (var e in entries)
+            {
+                var obj = new Dictionary<string, object>
+                {
+                    ["element_id"] = e.ElementId,
+                    ["status"] = e.Status,
+                    ["matched_asset_id"] = e.MatchedAssetId,
+                    ["signals"] = e.RawSignals ?? new Dictionary<string, object>
+                    {
+                        ["visual"] = 0.0,
+                        ["structural"] = 0.0,
+                        ["agree"] = false,
+                        ["margin"] = 0.0,
+                    },
+                };
+                if (e.RawResize != null) obj["resize"] = e.RawResize;
+                arr.Add(obj);
+            }
+            File.WriteAllText(path, JsonWriter.Write(arr));
         }
     }
 }

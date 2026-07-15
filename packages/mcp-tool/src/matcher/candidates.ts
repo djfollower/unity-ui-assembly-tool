@@ -10,6 +10,36 @@ import { tokenize } from "./tokenize.js";
 
 const DEFAULT_TOP_K = 10;
 
+// Figma's own auto-generated default names, tested against the id with any
+// reduce-from-selection.ts collision-disambiguation suffix stripped (e.g.
+// "Rectangle 70__178-34525" -> "Rectangle 70").
+const GENERIC_NAME_PATTERN =
+  /^(rectangle|ellipse|frame|group|vector|line|polygon|star|component|instance|boolean)\s*\d*$/i;
+
+// A generous ceiling, not "always the whole catalog" - the catalog is
+// expected to grow over successive runs (see fallback-asset-generation in
+// project memory), so this shouldn't scale unboundedly. Comfortably above
+// today's real catalog size (65) so nothing is actually truncated in
+// practice right now - revisit this constant if the catalog approaches it.
+const WEAK_SIGNAL_TOP_K = 100;
+
+// True when an element's own naming/tagging gives the IDF retrieval below
+// nothing real to work with - checked against the real catalog: role/
+// feature tags are uniform across every entry (no filterable category
+// signal there), and a generic Figma default name + a generic/absent type
+// tag (composite leaf members never get an individual type picker in the
+// plugin UI) means token-overlap ranking is close to arbitrary for these.
+// Better to skip the narrowing pre-filter and let the small catalog's
+// (near-)full set reach the real pixel comparison in visual-signal.ts,
+// rather than risk excluding the correct candidate before it's ever
+// actually looked at.
+export function isWeakSignal(element: ElementTree["elements"][number]): boolean {
+  const bareId = element.id.split("__")[0].trim();
+  const genericName = GENERIC_NAME_PATTERN.test(bareId);
+  const genericType = !element.type || element.type === "other";
+  return genericName && genericType;
+}
+
 function elementTokens(element: ElementTree["elements"][number]): Set<string> {
   const parts = [element.id, element.type, element.visual_description];
   if (element.text_content) parts.push(element.text_content);
@@ -69,6 +99,7 @@ export function candidates(
 ): CatalogEntry {
   const idf = idfByToken(catalog);
   const elementSet = elementTokens(element);
+  const effectiveTopK = isWeakSignal(element) ? Math.min(catalog.length, WEAK_SIGNAL_TOP_K) : topK;
   return catalog
     .map((entry) => {
       const entrySet = catalogEntryTokens(entry);
@@ -84,6 +115,6 @@ export function candidates(
       return { entry, score };
     })
     .sort((a, b) => b.score - a.score)
-    .slice(0, topK)
+    .slice(0, effectiveTopK)
     .map(({ entry }) => entry);
 }

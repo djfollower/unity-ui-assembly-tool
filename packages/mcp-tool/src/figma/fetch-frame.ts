@@ -35,6 +35,14 @@ export interface FigmaNode {
   characters?: string;
   effects?: Array<{ type: string; visible?: boolean }>;
   children?: FigmaNode[];
+  // Present only on exports from the figma-plugin/ checkbox tree (see
+  // reduce-from-selection.ts) - absent on plain REST-API-fetched nodes.
+  selected?: boolean;
+  typeTag?: string;
+  compositeGroupId?: string;
+  // Base64 PNG data URI captured by the plugin's Stage 1 exportAsync
+  // thumbnails - a review-UI preview source, not used by matching itself.
+  thumbnail?: string;
   [key: string]: unknown;
 }
 

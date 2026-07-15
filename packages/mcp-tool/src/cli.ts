@@ -2,7 +2,7 @@
 // Entry point for the MCP tool side of the pipeline. No MCP server wrapper
 // yet for the slice — this is invoked directly (see scripts/ in repo root).
 // Subcommands land as each week's tasks complete:
-//   fetch-frame | reduce | build-catalog-descriptions | match | figma-node-rect
+//   fetch-frame | reduce | reduce-from-selection | build-catalog-descriptions | match | figma-node-rect
 
 import { existsSync, readFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
@@ -10,10 +10,11 @@ import path from "node:path";
 import type { ElementTree, MatchResult } from "@ui-assembler-slice/contracts";
 import { loadCatalog } from "./catalog/load-catalog.js";
 import { matchElementTree } from "./matcher/match.js";
-import { fetchFrame, cachePathFor } from "./figma/fetch-frame.js";
+import { fetchFrame, cachePathFor, type FigmaNode } from "./figma/fetch-frame.js";
 import { computeNodeRect } from "./figma/node-rect.js";
-import { parseTree } from "./figma/parse-tree.js";
+import { parseTree, type IntermediateNode } from "./figma/parse-tree.js";
 import { reduce } from "./figma/reduce.js";
+import { reduceFromSelection } from "./figma/reduce-from-selection.js";
 import { normalize } from "./figma/normalize.js";
 
 // Hardcoded to match the real Melon project's CanvasScaler setting - same
@@ -178,6 +179,62 @@ async function runReduce(args: string[]): Promise<void> {
   console.log(`element-tree.json: ${outputPath}`);
 }
 
+// Walked independently of reduceFromSelection() (which doesn't need to know
+// about thumbnails - single responsibility) - collects every node carrying
+// a plugin-captured preview image, keyed by its own Figma node id. That's
+// the key every emitted ReducedElement's figma_node_id traces back to
+// (directly, or via a composite group's anchor), so the Unity review
+// window can join a match-result row back to a preview without needing to
+// know anything about how reduceFromSelection restructured the tree.
+function collectThumbnails(node: IntermediateNode, into: Record<string, string>): void {
+  if (node.visible === false) return;
+  if (node.thumbnail) into[node.id] = node.thumbnail;
+  for (const child of node.children) collectThumbnails(child, into);
+}
+
+// Deterministic, non-LLM alternative to `reduce` - consumes the
+// figma-plugin/ checkbox tree's downloaded export directly (a standalone
+// file the user moves into place themselves, same as reduce/fetch-frame's
+// .cache/figma/... convention, but no Figma API/network involvement at
+// this stage at all, so no .env / access token needed here).
+async function runReduceFromSelection(args: string[]): Promise<void> {
+  const [inputPathArg, outputPathArg] = args;
+  if (!inputPathArg) {
+    console.error("Usage: ui-assembler reduce-from-selection <plugin-export.json> [output.json]");
+    process.exit(1);
+  }
+
+  const outputPath = outputPathArg ?? path.join(repoRoot(), ".cache", "element-tree.json");
+
+  const root = JSON.parse(await readFile(inputPathArg, "utf8")) as FigmaNode;
+
+  const bbox = root.absoluteBoundingBox;
+  if (!bbox) {
+    console.error(`reduce-from-selection: root node ${root.id} has no absoluteBoundingBox`);
+    process.exit(1);
+  }
+
+  const intermediate = parseTree(root);
+  const reduced = reduceFromSelection(intermediate);
+  console.error(`reduced to ${reduced.length} top-level element(s) - normalizing`);
+  const elementTree = normalize(reduced, {
+    frameId: root.id,
+    sourceFrame: { w: bbox.width, h: bbox.height },
+  }, CANVAS_SCALER_CONFIG);
+
+  await writeFile(outputPath, JSON.stringify(elementTree, null, 2));
+  console.log(`element-tree.json: ${outputPath}`);
+
+  // Fixed path, not parameterized - the review window expects it there,
+  // matching how element-tree.json/match-result.json already have fixed
+  // conventional .cache/ locations elsewhere in this CLI.
+  const thumbnails: Record<string, string> = {};
+  collectThumbnails(intermediate, thumbnails);
+  const thumbnailsPath = path.join(repoRoot(), ".cache", "element-thumbnails.json");
+  await writeFile(thumbnailsPath, JSON.stringify(thumbnails, null, 2));
+  console.log(`element-thumbnails.json: ${thumbnailsPath} (${Object.keys(thumbnails).length} entries)`);
+}
+
 const [, , command, ...args] = process.argv;
 
 switch (command) {
@@ -187,6 +244,9 @@ switch (command) {
   case "reduce":
     await runReduce(args);
     break;
+  case "reduce-from-selection":
+    await runReduceFromSelection(args);
+    break;
   case "match":
     await runMatch(args);
     break;
@@ -195,6 +255,6 @@ switch (command) {
     break;
   default:
     console.error(`Unknown or unimplemented command: ${command ?? "(none)"}`);
-    console.error("Commands: fetch-frame [--refresh] | reduce [output.json] | match <element-tree.json> <catalog.json> [output.json] | figma-node-rect <figma-node-id> [element-tree.json]");
+    console.error("Commands: fetch-frame [--refresh] | reduce [output.json] | reduce-from-selection <plugin-export.json> [output.json] | match <element-tree.json> <catalog.json> [output.json] | figma-node-rect <figma-node-id> [element-tree.json]");
     process.exit(1);
 }

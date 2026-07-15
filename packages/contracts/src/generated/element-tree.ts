@@ -58,6 +58,10 @@ export interface Element {
    * True when this element's children are several layers that combine into one visual (e.g. a frame + backing + glyph stacked to form one button), to be scored jointly by the matcher rather than independently. Explicit, not inferred from geometry - composite layers are not guaranteed to share an identical rect. Absent/false means an ordinary layout grouping.
    */
   composite?: boolean;
+  /**
+   * True when this element's children should be built as real nested GameObjects under a real parent transform (e.g. for post-assembly animation), rather than flattened to siblings under the canvas root. Explicit, author-set - absent/false means flatten (today's existing behavior). Independent of `composite` - a group can be composite, container, both, or neither.
+   */
+  container?: boolean;
 }
 /**
  * Position/size in canvas_reference space, post-normalization (R3).

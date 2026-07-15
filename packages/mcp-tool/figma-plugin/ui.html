@@ -1,14 +1,402 @@
 <style>
-  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 12px; padding: 12px; margin: 0; }
-  button { width: 100%; padding: 8px; margin-top: 10px; cursor: pointer; }
-  #status { line-height: 1.5; color: #333; word-break: break-word; }
-  code { background: #f0f0f0; padding: 2px 5px; border-radius: 3px; font-size: 11px; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12px;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    color: #222;
+  }
+  #status {
+    padding: 10px 12px;
+    line-height: 1.5;
+    color: #333;
+    word-break: break-word;
+    border-bottom: 1px solid #e5e5e5;
+    flex: none;
+  }
+  #status .frame-name { font-weight: 600; }
+  #status .hint { color: #888; font-size: 11px; }
+
+  #toolbar {
+    display: flex;
+    gap: 8px;
+    padding: 8px 12px;
+    border-bottom: 1px solid #e5e5e5;
+    flex: none;
+  }
+  button {
+    padding: 6px 10px;
+    cursor: pointer;
+    border: 1px solid #d0d0d0;
+    border-radius: 4px;
+    background: #fff;
+    font-size: 12px;
+  }
+  button:hover { background: #f5f5f5; }
+  button.primary { background: #18a0fb; border-color: #18a0fb; color: #fff; }
+  button.primary:hover { background: #0d8fe0; }
+  button.danger { background: #fff; border-color: #e04444; color: #e04444; }
+  button:disabled { opacity: 0.5; cursor: default; }
+
+  #combine-bar {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #eef7ff;
+    border-bottom: 1px solid #cfe8ff;
+    flex: none;
+  }
+  #combine-bar.active { display: flex; }
+  #combine-bar .count { font-weight: 600; }
+
+  #tree {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    white-space: nowrap;
+  }
+  .row.dimmed { opacity: 0.5; }
+  .row.combine-target { cursor: pointer; }
+  .row.combine-target:hover { background: #f0f7ff; }
+  .row.pending-combine { background: #eef7ff; }
+
+  .toggle {
+    width: 14px;
+    flex: none;
+    text-align: center;
+    cursor: pointer;
+    color: #888;
+    user-select: none;
+  }
+  .toggle.leaf { visibility: hidden; }
+
+  .thumb {
+    width: 22px;
+    height: 22px;
+    flex: none;
+    border: 1px solid #e0e0e0;
+    border-radius: 3px;
+    background: #f7f7f7;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    font-size: 9px;
+    color: #bbb;
+  }
+  .thumb img { width: 100%; height: 100%; object-fit: contain; }
+
+  .name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 160px;
+  }
+  .type-badge {
+    color: #999;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    flex: none;
+  }
+  .composite-badge {
+    flex: none;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: #fff1e0;
+    color: #b5560f;
+    cursor: pointer;
+    border: 1px solid #f0d5b0;
+  }
+  .composite-badge.pending-uncombine { background: #ffe0e0; color: #c0392b; border-color: #f0b0b0; }
+  .added-badge {
+    flex: none;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: #18a0fb;
+    color: #fff;
+  }
+  .type-select { flex: none; font-size: 11px; padding: 1px 2px; }
+  .text-label { flex: none; font-size: 10px; color: #888; font-style: italic; }
 </style>
+
 <div id="status">Select one frame in Figma, then re-run this plugin.</div>
-<button id="download" style="display:none">Download JSON</button>
+<div id="toolbar">
+  <button id="combine-toggle" disabled>Combine</button>
+  <button id="download" class="primary" disabled>Download JSON</button>
+</div>
+<div id="combine-bar">
+  <span><span class="count" id="combine-count">0</span> selected</span>
+  <button id="combine-confirm" class="primary" disabled>Confirm combine</button>
+  <button id="combine-cancel">Cancel</button>
+</div>
+<div id="tree"></div>
 
 <script>
-  let payload = null;
+  const TYPE_TAGS = ["button", "icon", "panel", "image", "other"];
+
+  let tree = null;
+  let nodeIndex = new Map(); // id -> node object (as received/augmented)
+  let fileKey = null, rootNodeId = null, rootNodeName = null;
+
+  let checked = new Set();
+  let typeTags = new Map(); // id -> tag string, only for checked non-text nodes
+  let expanded = new Set(); // ids whose children are currently shown
+  let thumbnails = new Map(); // id -> dataUri | "loading" | "error"
+
+  let combineMode = false;
+  let pendingCombine = new Set();
+  let pendingUncombineGroupId = null;
+
+  function post(message) {
+    parent.postMessage({ pluginMessage: message }, "*");
+  }
+
+  function indexTree(node) {
+    nodeIndex.set(node.id, node);
+    (node.children || []).forEach(indexTree);
+  }
+
+  // Flat list of currently-visible rows: top-level nodes are always shown,
+  // a node's children are shown only once its own id is in `expanded` -
+  // keeps the DOM bounded to what the user has actually opened, not all
+  // 901 nodes a real frame can contain.
+  function visibleRows() {
+    const rows = [];
+    function walk(node, depth) {
+      rows.push({ node, depth });
+      if (expanded.has(node.id)) {
+        (node.children || []).forEach((child) => walk(child, depth + 1));
+      }
+    }
+    (tree.children || []).forEach((child) => walk(child, 0));
+    return rows;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  function renderThumb(node) {
+    const state = thumbnails.get(node.id);
+    if (state === "loading") return `<div class="thumb">…</div>`;
+    if (state === "error" || !state) return `<div class="thumb"></div>`;
+    return `<div class="thumb"><img src="${state}" alt=""></div>`;
+  }
+
+  function renderRow({ node, depth }) {
+    const hasChildren = (node.children || []).length > 0;
+    const isText = node.type === "TEXT";
+    const isChecked = checked.has(node.id);
+    const isDimmed = node.visible === false;
+    const inPending = pendingCombine.has(node.id);
+
+    const rowClasses = ["row"];
+    if (isDimmed) rowClasses.push("dimmed");
+    if (combineMode) rowClasses.push("combine-target");
+    if (inPending) rowClasses.push("pending-combine");
+
+    const toggle = hasChildren
+      ? `<span class="toggle" data-action="toggle-expand" data-node-id="${node.id}">${expanded.has(node.id) ? "▾" : "▸"}</span>`
+      : `<span class="toggle leaf">▸</span>`;
+
+    const checkbox = `<input type="checkbox" data-action="toggle-check" data-node-id="${node.id}" ${isChecked ? "checked" : ""} ${combineMode ? "disabled" : ""}>`;
+
+    let tagControl = "";
+    if (isChecked && isText) {
+      tagControl = `<span class="text-label">text</span>`;
+    } else if (isChecked) {
+      const current = typeTags.get(node.id) || "other";
+      tagControl = `<select class="type-select" data-action="set-tag" data-node-id="${node.id}">` +
+        TYPE_TAGS.map((t) => `<option value="${t}" ${t === current ? "selected" : ""}>${t}</option>`).join("") +
+        `</select>`;
+    }
+
+    let compositeControl = "";
+    if (node.compositeGroupId) {
+      const pending = pendingUncombineGroupId === node.compositeGroupId;
+      compositeControl = `<span class="composite-badge ${pending ? "pending-uncombine" : ""}" data-action="${pending ? "confirm-uncombine" : "ask-uncombine"}" data-group-id="${node.compositeGroupId}">${pending ? "uncombine?" : "combined"}</span>`;
+    }
+
+    const addedBadge = combineMode && inPending ? `<span class="added-badge">added</span>` : "";
+
+    return `<div class="${rowClasses.join(" ")}" style="padding-left:${8 + depth * 16}px" data-action="${combineMode ? "combine-pick" : ""}" data-node-id="${node.id}">
+      ${toggle}
+      ${checkbox}
+      ${renderThumb(node)}
+      <span class="name" title="${escapeHtml(node.name)}">${escapeHtml(node.name)}</span>
+      <span class="type-badge">${escapeHtml(node.type)}</span>
+      ${compositeControl}
+      ${addedBadge}
+      ${tagControl}
+    </div>`;
+  }
+
+  function render() {
+    if (!tree) return;
+
+    document.getElementById("status").innerHTML =
+      `<div class="frame-name">${escapeHtml(rootNodeName)}</div>` +
+      `<div class="hint">Check the nodes to assemble, tag their type, Combine layered composites, then Download.</div>`;
+
+    const rows = visibleRows();
+    document.getElementById("tree").innerHTML = rows.map(renderRow).join("");
+
+    const combineToggle = document.getElementById("combine-toggle");
+    combineToggle.textContent = combineMode ? "Cancel combine" : "Combine";
+    combineToggle.disabled = false;
+
+    const combineBar = document.getElementById("combine-bar");
+    combineBar.classList.toggle("active", combineMode);
+    document.getElementById("combine-count").textContent = String(pendingCombine.size);
+    document.getElementById("combine-confirm").disabled = pendingCombine.size < 2;
+
+    document.getElementById("download").disabled = checked.size === 0;
+
+    requestMissingThumbnails(rows);
+  }
+
+  function requestMissingThumbnails(rows) {
+    const needed = rows
+      .map((r) => r.node.id)
+      .filter((id) => !thumbnails.has(id));
+    if (needed.length === 0) return;
+    needed.forEach((id) => thumbnails.set(id, "loading"));
+    post({ type: "requestThumbnails", nodeIds: needed });
+  }
+
+  // Rows are plain strings re-rendered on structural changes; thumbnails
+  // arrive independently (success or failure) and shouldn't force a full
+  // tree re-render while many are still streaming in, so patch just the
+  // specific row's thumb slot directly if it's currently in the DOM.
+  function patchThumbSlot(nodeId) {
+    const row = document.querySelector(`.row[data-node-id="${nodeId}"]`);
+    if (row) {
+      const thumb = row.querySelector(".thumb");
+      if (thumb) thumb.outerHTML = renderThumb({ id: nodeId });
+    }
+  }
+
+  function buildExportNode(node) {
+    const out = {
+      id: node.id,
+      name: node.name,
+      type: node.type,
+      visible: node.visible,
+    };
+    if (node.absoluteBoundingBox) out.absoluteBoundingBox = node.absoluteBoundingBox;
+    if (node.type === "TEXT" && node.characters !== undefined) out.characters = node.characters;
+    if (node.effects) out.effects = node.effects;
+
+    out.selected = checked.has(node.id);
+    if (out.selected && node.type !== "TEXT") {
+      out.typeTag = typeTags.get(node.id) || "other";
+    }
+    if (node.compositeGroupId) out.compositeGroupId = node.compositeGroupId;
+
+    // Anything that will get its own match-result row downstream needs a
+    // preview image for Stage 3's review screen - not just checked nodes,
+    // but composite-group members too (individually scored per-child even
+    // though they're picked via Combine, not their own checkbox). Omitted
+    // (not null) when no thumbnail resolved yet - a rare pre-resolution
+    // race, not worth blocking export over; the review screen already
+    // treats a missing preview as an acceptable gap.
+    if (out.selected || node.compositeGroupId) {
+      const thumb = thumbnails.get(node.id);
+      if (typeof thumb === "string" && thumb.startsWith("data:")) out.thumbnail = thumb;
+    }
+
+    if (node.children) out.children = node.children.map(buildExportNode);
+    return out;
+  }
+
+  function downloadExport() {
+    const json = JSON.stringify(buildExportNode(tree), null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${fileKey}__${rootNodeId.replace(":", "-")}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  // ---- event delegation ----
+
+  document.getElementById("tree").addEventListener("click", (event) => {
+    const toggleEl = event.target.closest('[data-action="toggle-expand"]');
+    if (toggleEl) {
+      const id = toggleEl.dataset.nodeId;
+      if (expanded.has(id)) expanded.delete(id); else expanded.add(id);
+      render();
+      return;
+    }
+
+    const uncombineAsk = event.target.closest('[data-action="ask-uncombine"]');
+    if (uncombineAsk) {
+      pendingUncombineGroupId = uncombineAsk.dataset.groupId;
+      render();
+      return;
+    }
+    const uncombineConfirm = event.target.closest('[data-action="confirm-uncombine"]');
+    if (uncombineConfirm) {
+      const groupId = uncombineConfirm.dataset.groupId;
+      const memberIds = [...nodeIndex.values()].filter((n) => n.compositeGroupId === groupId).map((n) => n.id);
+      post({ type: "uncombine", groupId, nodeIds: memberIds });
+      pendingUncombineGroupId = null;
+      return;
+    }
+
+    const pickRow = event.target.closest('[data-action="combine-pick"]');
+    if (pickRow && combineMode) {
+      const id = pickRow.dataset.nodeId;
+      if (pendingCombine.has(id)) pendingCombine.delete(id); else pendingCombine.add(id);
+      render();
+    }
+  });
+
+  document.getElementById("tree").addEventListener("change", (event) => {
+    const checkboxEl = event.target.closest('[data-action="toggle-check"]');
+    if (checkboxEl) {
+      const id = checkboxEl.dataset.nodeId;
+      if (checkboxEl.checked) checked.add(id); else checked.delete(id);
+      render();
+      return;
+    }
+    const tagEl = event.target.closest('[data-action="set-tag"]');
+    if (tagEl) {
+      typeTags.set(tagEl.dataset.nodeId, tagEl.value);
+    }
+  });
+
+  document.getElementById("combine-toggle").addEventListener("click", () => {
+    combineMode = !combineMode;
+    pendingCombine.clear();
+    render();
+  });
+  document.getElementById("combine-cancel").addEventListener("click", () => {
+    combineMode = false;
+    pendingCombine.clear();
+    render();
+  });
+  document.getElementById("combine-confirm").addEventListener("click", () => {
+    post({ type: "confirmCombine", nodeIds: [...pendingCombine] });
+  });
+  document.getElementById("download").addEventListener("click", downloadExport);
 
   window.onmessage = (event) => {
     const msg = event.data.pluginMessage;
@@ -16,29 +404,48 @@
 
     if (msg.type === "error") {
       document.getElementById("status").textContent = msg.message;
-      document.getElementById("download").style.display = "none";
       return;
     }
 
-    if (msg.type === "export") {
-      payload = msg;
-      const targetPath = `.cache/figma/${msg.fileKey}/${msg.nodeId.replace(":", "-")}.json`;
-      document.getElementById("status").innerHTML =
-        `Exported "<b>${msg.nodeName}</b>". Click Download, then move the downloaded file into the tool repo at:<br><code>${targetPath}</code>`;
-      document.getElementById("download").style.display = "block";
+    if (msg.type === "init") {
+      tree = msg.tree;
+      fileKey = msg.fileKey;
+      rootNodeId = msg.nodeId;
+      rootNodeName = msg.nodeName;
+      nodeIndex = new Map();
+      indexTree(tree);
+      render();
+      return;
     }
-  };
 
-  document.getElementById("download").onclick = () => {
-    if (!payload) return;
-    const blob = new Blob([payload.json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${payload.fileKey}__${payload.nodeId.replace(":", "-")}.json`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    if (msg.type === "thumbnail") {
+      thumbnails.set(msg.nodeId, msg.dataUri);
+      patchThumbSlot(msg.nodeId);
+      return;
+    }
+    if (msg.type === "thumbnailError") {
+      thumbnails.set(msg.nodeId, "error");
+      patchThumbSlot(msg.nodeId);
+      return;
+    }
+
+    if (msg.type === "combineConfirmed") {
+      msg.nodeIds.forEach((id) => {
+        const node = nodeIndex.get(id);
+        if (node) node.compositeGroupId = msg.groupId;
+      });
+      combineMode = false;
+      pendingCombine.clear();
+      render();
+      return;
+    }
+    if (msg.type === "uncombineConfirmed") {
+      msg.nodeIds.forEach((id) => {
+        const node = nodeIndex.get(id);
+        if (node) delete node.compositeGroupId;
+      });
+      render();
+      return;
+    }
   };
 </script>

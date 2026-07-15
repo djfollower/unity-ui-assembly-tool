@@ -38,7 +38,10 @@ namespace UiAssemblerSlice.Editor.Assembler
             // no extra z-ordering logic needed.
             foreach (var element in elementTree.Elements)
             {
-                BuildRecursive(element, parent, matchByElementId, catalogById);
+                // (0, 0): the canvas root's own top-left is the coordinate
+                // origin element-tree.json's rects are already absolute
+                // against - see BuildRecursive's originX/originY comment.
+                BuildRecursive(element, parent, 0f, 0f, matchByElementId, catalogById);
             }
 
             return parent.gameObject;
@@ -47,29 +50,70 @@ namespace UiAssemblerSlice.Editor.Assembler
         private static void BuildRecursive(
             ElementData element,
             Transform parent,
+            float originX,
+            float originY,
             Dictionary<string, MatchResultEntry> matchByElementId,
             Dictionary<string, CatalogEntryData> catalogById)
         {
-            // An element with children is a pure grouping container (same
-            // convention matcher/match.ts already uses) - there's no single
-            // catalog entry for "the whole composite," so it's never
-            // instantiated itself, only recursed into. All of its
-            // descendants carry their own absolute rect, so flattening them
-            // as direct siblings under `parent` (rather than nesting under
-            // an intermediate container GameObject) needs no relative-
-            // position math.
+            // element.Rect is always absolute canvas-space (normalize.ts's
+            // convention). originX/originY is the absolute position of
+            // `parent`'s own top-left corner - (0,0) at the top of the
+            // recursion (canvas root), or a container's own rect.X/Y once
+            // we've descended into one (see the Container branch below).
+            // Subtracting it converts element.Rect into `parent`-relative
+            // coordinates, which is what PositionRect's anchoredPosition
+            // math actually needs. When nothing is ever nested under a real
+            // container (today's only path, still true for every non-
+            // container element), originX/Y stays (0,0) the whole way down
+            // and localRect is byte-for-byte identical to element.Rect -
+            // this refactor changes nothing for that path.
+            var localRect = new RectData(
+                element.Rect.X - originX,
+                element.Rect.Y - originY,
+                element.Rect.W,
+                element.Rect.H);
+
             if (element.Children.Count > 0)
             {
+                if (element.Container)
+                {
+                    // Unlike a pure grouping container (below), this
+                    // element IS itself instantiated - a real empty
+                    // GameObject its children nest under for real, e.g. so
+                    // the whole thing can be scaled/tweened as one unit
+                    // post-assembly. Center pivot (PositionContainerRect,
+                    // not PositionRect) so that animation happens around
+                    // the visual center, not the top-left corner - scoped
+                    // to container GameObjects only, every leaf element
+                    // below keeps the existing top-left convention
+                    // untouched.
+                    var containerGo = new GameObject(element.Id, typeof(RectTransform));
+                    containerGo.transform.SetParent(parent, false);
+                    PositionContainerRect(containerGo.GetComponent<RectTransform>(), localRect);
+
+                    foreach (var child in element.Children)
+                    {
+                        BuildRecursive(child, containerGo.transform, element.Rect.X, element.Rect.Y, matchByElementId, catalogById);
+                    }
+                    return;
+                }
+
+                // A pure grouping container (same convention matcher/
+                // match.ts already uses) - there's no single catalog entry
+                // for "the whole composite," so it's never instantiated
+                // itself, only recursed into. Flattens to direct siblings
+                // under `parent`, same origin - today's only behavior when
+                // Container isn't set.
                 foreach (var child in element.Children)
                 {
-                    BuildRecursive(child, parent, matchByElementId, catalogById);
+                    BuildRecursive(child, parent, originX, originY, matchByElementId, catalogById);
                 }
                 return;
             }
 
             if (element.Type == "text")
             {
-                BuildText(element, parent);
+                BuildText(element, parent, localRect);
                 return;
             }
 
@@ -91,10 +135,14 @@ namespace UiAssemblerSlice.Editor.Assembler
                 return;
             }
 
+            // BuildFromSprite/ResizeMainImageToFill only ever read
+            // element.Rect's W/H (Sliced pre-composite target size), never
+            // X/Y, so they're unaffected by the absolute-vs-local
+            // distinction and keep using element.Rect directly.
             var go = entry.Type == "prefab" ? BuildFromPrefab(entry) : BuildFromSprite(entry, element.Rect);
             go.name = element.Id;
             go.transform.SetParent(parent, false);
-            PositionRect(go.GetComponent<RectTransform>(), element.Rect);
+            PositionRect(go.GetComponent<RectTransform>(), localRect);
 
             if (entry.Type == "prefab")
             {
@@ -250,7 +298,7 @@ namespace UiAssemblerSlice.Editor.Assembler
             }
         }
 
-        private static void BuildText(ElementData element, Transform parent)
+        private static void BuildText(ElementData element, Transform parent, RectData rect)
         {
             var go = new GameObject(element.Id, typeof(RectTransform));
             go.transform.SetParent(parent, false);
@@ -265,20 +313,37 @@ namespace UiAssemblerSlice.Editor.Assembler
             tmp.enableAutoSizing = true;
             tmp.fontSizeMin = 1;
             tmp.fontSizeMax = 200;
-            PositionRect(go.GetComponent<RectTransform>(), element.Rect);
+            PositionRect(go.GetComponent<RectTransform>(), rect);
         }
 
         // element-tree.json's rects are absolute, y-down from the frame's
         // top-left (see normalize.ts's own comment on this convention) -
         // top-left anchor/pivot makes anchoredPosition a direct copy of
         // (x, -y) with no further math, matching T3.2's "absolute
-        // reference-space rect, no anchoring intelligence" scope.
+        // reference-space rect, no anchoring intelligence" scope. Callers
+        // pass an already-`parent`-relative rect (BuildRecursive's
+        // localRect) - this function does no origin math of its own.
         internal static void PositionRect(RectTransform rt, RectData rect)
         {
             rt.anchorMin = new Vector2(0, 1);
             rt.anchorMax = new Vector2(0, 1);
             rt.pivot = new Vector2(0, 1);
             rt.anchoredPosition = new Vector2(rect.X, -rect.Y);
+            rt.sizeDelta = new Vector2(rect.W, rect.H);
+        }
+
+        // Same anchor point (parent's top-left) as PositionRect, so it
+        // still needs no knowledge of the parent's own size, but a CENTER
+        // pivot instead - only used for container GameObjects (see
+        // BuildRecursive), so that animating one (scale/rotate) happens
+        // around its visual center rather than its top-left corner. Every
+        // leaf element keeps using PositionRect, untouched by this.
+        internal static void PositionContainerRect(RectTransform rt, RectData rect)
+        {
+            rt.anchorMin = new Vector2(0, 1);
+            rt.anchorMax = new Vector2(0, 1);
+            rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.anchoredPosition = new Vector2(rect.X + rect.W / 2f, -(rect.Y + rect.H / 2f));
             rt.sizeDelta = new Vector2(rect.W, rect.H);
         }
     }
