@@ -8,9 +8,12 @@ export interface MatchResult1 {
    * References element-tree.json's elements[].id.
    */
   element_id: string;
-  status: "matched" | "uncertain" | "missing";
   /**
-   * References catalog-entry.json's id; null when status is missing.
+   * fallback_eligible: a composite (Combine) group scored below the missing floor against the existing catalog, but a hi-res capture of the group was taken in the Figma plugin at Combine-confirm time - offered for import as a new catalog entry instead of a plain miss.
+   */
+  status: "matched" | "uncertain" | "missing" | "fallback_eligible";
+  /**
+   * References catalog-entry.json's id; null when status is missing or fallback_eligible.
    */
   matched_asset_id: string | null;
   signals: {

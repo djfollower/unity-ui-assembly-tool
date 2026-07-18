@@ -108,10 +108,9 @@ function histogramSimilarity(a: number[], b: number[]): number {
 }
 
 // SSIM + color-histogram comparison of two already-rendered PNGs (a crop of
-// real mockup pixels vs. a synthetic render, or - for composite-visual-
-// signal.ts - two synthetic renders against each other). Factored out of
-// visualSignal so composite-visual-signal.ts's joint (whole-group-vs-crop)
-// comparison can reuse the exact same scoring, not a second copy of it.
+// real mockup pixels vs. a synthetic render). Factored out of visualSignal
+// as its own exported function so any other caller needing the same
+// pixel-comparison scoring can reuse it without a second copy.
 export async function compareImages(aPng: Buffer, bPng: Buffer): Promise<number> {
   const [imageA, imageB] = await Promise.all([
     toComparableImage(aPng, COMPARISON_SIZE),

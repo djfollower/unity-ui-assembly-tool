@@ -93,6 +93,18 @@ one's render metadata (`RenderMetadataProbe`), and rendering a canonical thumbna
 (`RenderedThumbnail`) - see that file's doc comment for why thumbnails go through a real
 Canvas/Camera render rather than a hand-rolled compositor. Writes `.cache/catalog.json`.
 
+Incremental by default: each asset's `AssetDatabase.GetAssetDependencyHash` is cached in
+`.cache/catalog-build-cache.json`, so a re-run only re-probes/re-renders assets that actually
+changed (or whose dependencies changed) - unchanged entries are reused verbatim. Set
+`FORCE_FULL=true` to bypass the cache and re-render everything (needed after changing
+`RenderMetadataProbe.cs`/`RenderedThumbnail.cs` themselves, a change the content hash can't see).
+
+Thumbnails are separate PNG files under `.cache/thumbnails/`, not inline base64 in `catalog.json`
+(`thumbnail_path` is a path relative to catalog.json's own directory) - keeps the catalog itself
+small and diffable even at thousands of entries. Both `loadCatalog` (Node) and
+`AssemblerJson.LoadCatalog` (Unity) resolve it to an absolute path on load, so nothing downstream
+needs to know where catalog.json lives.
+
 **2. Capture the Figma frame and reduce it to an element tree**:
 
 ```

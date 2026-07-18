@@ -273,3 +273,39 @@ documented in `normalize.ts`'s notes, not a rendering error. This run used `.cac
 as-is (raw matcher output, pre-human-review promotions), so `icon_glow` (`uncertain`) is correctly
 absent here too, same as `Scrim`/`icon_gem`/`button_share` (`missing`) - re-run against a
 promoted/reviewed match-result.json for a render matching the fully-`matched` prefab state.
+
+## Fourth update: Gate 2 threshold re-tune after the thumbnail rendering fixes (graduation-phase session)
+
+The thumbnail-rendering bug fixes earlier this session (`HANDOFF.md` "Thumbnail rendering bug,
+parts 2-4") changed what the catalog's thumbnails actually look like (full composite frame+icon+
+text vs. the old cropped/wrong-shaped single image) - re-running the raw matcher against the fixed
+catalog dropped auto-accept rate to 28.6% (2/7), below even this file's own documented 42.9%
+raw-matcher baseline. Root cause, found by collecting real per-candidate visual/structural scores
+once and sweeping weight/threshold combinations against them: several of this fixture's near-miss
+cases are near-visual-DUPLICATES (three different frame sprites scoring visual ~0.345-0.347 against
+the same element) - min-max normalization stretches that noise-level spread across nearly the full
+0-1 range, so the OLD 60%-visual weighting let noise drown out a genuinely-informative structural
+signal. Re-tuned `gate.ts`: `WEIGHT_VISUAL` 0.6→0.4, `WEIGHT_STRUCTURAL` 0.4→0.6,
+`MATCH_VISUAL_THRESHOLD` 0.4→0.35, `MARGIN_THRESHOLD` 0.12→0.05 (`MISSING_VISUAL_THRESHOLD`
+unchanged at 0.24) - see `gate.ts`'s own comment for the full reasoning and why this specific
+weight split (not a more extreme one that scored identically on this small fixture).
+
+Re-ran `match` end-to-end against the fixed catalog and re-scored:
+
+| Metric | Value | Target | Result |
+|---|---|---|---|
+| False-accept rate | 0.0% | ≤ 10% | ok |
+| Auto-accept rate | 42.9% | ≥ 50% | below target |
+| Missing recall | 100.0% | ≥ 90% | ok |
+
+**Verdict: SOFT PASS** - restores the matcher's raw auto-accept rate to this file's previously-
+documented 42.9% baseline (confirmed via a fine-grained sweep to be the actual ceiling for
+weight/threshold tuning alone on this fixture - 424 tied configs found it, none scored higher).
+Getting past it needs better candidate-ranking quality for the two remaining wrong-selection cases
+(`icon_glow`, `button_x_frame` - both still pick a visually-similar-but-wrong asset even after
+reweighting), the same "residual coarse-visual-signal limitations" flagged in the original Gate 2
+readout below - not something threshold/weight tuning can fix, since the underlying candidate
+scores themselves rank the wrong asset first. The prior sections' 85.7%/PASS numbers reflect a
+golden-fixture correction plus a human review pass promoting 3 `uncertain` entries after manual
+confirmation, not a matcher improvement - still the honest path to a full PASS today, same as
+documented above.

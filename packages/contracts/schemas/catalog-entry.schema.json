@@ -8,7 +8,7 @@
   "definitions": {
     "catalogEntry": {
       "type": "object",
-      "required": ["id", "path", "type", "feature", "render", "thumbnail", "role", "interactive", "visual_description"],
+      "required": ["id", "path", "type", "feature", "render", "thumbnail_path", "role", "interactive", "visual_description"],
       "additionalProperties": false,
       "properties": {
         "id": {
@@ -67,9 +67,9 @@
             }
           }
         },
-        "thumbnail": {
+        "thumbnail_path": {
           "type": "string",
-          "description": "Base64 data URI of the RENDERED asset (at canonical size, post 9-slice/tint), not the raw texture (R14)."
+          "description": "Path to a PNG file of the RENDERED asset (at canonical size, post 9-slice/tint), not the raw texture (R14) - relative to catalog.json's own directory, not the repo root or the Unity project."
         },
         "role": {
           "type": "string",

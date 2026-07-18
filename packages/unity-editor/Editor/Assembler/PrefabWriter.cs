@@ -34,7 +34,12 @@ namespace UiAssemblerSlice.Editor.Assembler
         // reliably register a brand-new folder as an asset in time for an
         // immediate SaveAsPrefabAsset call; creating the chain via
         // AssetDatabase.CreateFolder does.
-        private static void EnsureFolderExists(string assetFolderPath)
+        //
+        // internal, not private: NodeBuilder.cs's composited-Sliced-sprite
+        // persistence (see its own comment) needs the exact same folder-
+        // creation reliability for a different destination folder - reused
+        // rather than a second, possibly-diverging copy.
+        internal static void EnsureFolderExists(string assetFolderPath)
         {
             if (AssetDatabase.IsValidFolder(assetFolderPath)) return;
 

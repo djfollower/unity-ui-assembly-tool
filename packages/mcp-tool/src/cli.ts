@@ -61,7 +61,18 @@ async function runMatch(args: string[]): Promise<void> {
   const catalog = await loadCatalog(catalogPath);
   const outputPath = outputPathArg ?? path.join(repoRoot(), ".cache", "match-result.json");
 
+  // Fixed path, not parameterized - same convention as
+  // element-thumbnails.json (see runReduceFromSelection): always written
+  // there by reduce-from-selection, always read from there here. Absent
+  // (not an error) for a plain `reduce` (LLM) run, or a reduce-from-
+  // selection run where no Combine group got a real anchor capture.
+  const fallbackCapturesPath = path.join(repoRoot(), ".cache", "element-fallback-captures.json");
+  const fallbackCaptureIds = existsSync(fallbackCapturesPath)
+    ? new Set(Object.keys(JSON.parse(await readFile(fallbackCapturesPath, "utf8"))))
+    : new Set<string>();
+
   const result: MatchResult = await matchElementTree(elementTree, catalog, {
+    fallbackCaptureIds,
     onProgress: (done, total, elementId) => {
       console.error(`[${done}/${total}] ${elementId}`);
     },
@@ -72,7 +83,9 @@ async function runMatch(args: string[]): Promise<void> {
 
   const counts: Record<string, number> = {};
   for (const entry of result) counts[entry.status] = (counts[entry.status] ?? 0) + 1;
-  console.log(`matched=${counts.matched ?? 0} uncertain=${counts.uncertain ?? 0} missing=${counts.missing ?? 0}`);
+  console.log(
+    `matched=${counts.matched ?? 0} uncertain=${counts.uncertain ?? 0} missing=${counts.missing ?? 0} fallback_eligible=${counts.fallback_eligible ?? 0}`,
+  );
 }
 
 async function runFigmaNodeRect(args: string[]): Promise<void> {
@@ -215,7 +228,7 @@ async function runReduceFromSelection(args: string[]): Promise<void> {
   }
 
   const intermediate = parseTree(root);
-  const reduced = reduceFromSelection(intermediate);
+  const { elements: reduced, fallbackCaptures } = reduceFromSelection(intermediate);
   console.error(`reduced to ${reduced.length} top-level element(s) - normalizing`);
   const elementTree = normalize(reduced, {
     frameId: root.id,
@@ -233,6 +246,13 @@ async function runReduceFromSelection(args: string[]): Promise<void> {
   const thumbnailsPath = path.join(repoRoot(), ".cache", "element-thumbnails.json");
   await writeFile(thumbnailsPath, JSON.stringify(thumbnails, null, 2));
   console.log(`element-thumbnails.json: ${thumbnailsPath} (${Object.keys(thumbnails).length} entries)`);
+
+  // reduceFromSelection already collects these (keyed by figma_node_id,
+  // same convention as element-thumbnails.json above) - match.ts's runMatch
+  // reads this to decide missing -> fallback_eligible.
+  const fallbackCapturesPath = path.join(repoRoot(), ".cache", "element-fallback-captures.json");
+  await writeFile(fallbackCapturesPath, JSON.stringify(fallbackCaptures, null, 2));
+  console.log(`element-fallback-captures.json: ${fallbackCapturesPath} (${Object.keys(fallbackCaptures).length} entries)`);
 }
 
 const [, , command, ...args] = process.argv;

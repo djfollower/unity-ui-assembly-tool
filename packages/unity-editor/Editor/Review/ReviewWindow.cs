@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using UiAssemblerSlice.Editor.Assembler;
 using UiAssemblerSlice.Editor.Batch;
+using UiAssemblerSlice.Editor.Catalog;
 using UnityEditor;
 using UnityEngine;
 
@@ -49,6 +50,7 @@ namespace UiAssemblerSlice.Editor.Review
         private List<MatchResultEntry> _matchResults;
         private List<CatalogEntryData> _catalog;
         private Dictionary<string, string> _elementThumbnails = new Dictionary<string, string>();
+        private Dictionary<string, string> _elementFallbackCaptures = new Dictionary<string, string>();
         private Dictionary<string, ElementData> _elementById = new Dictionary<string, ElementData>();
         private Dictionary<string, CatalogEntryData> _catalogById = new Dictionary<string, CatalogEntryData>();
         private Vector2 _reviewScroll;
@@ -69,6 +71,7 @@ namespace UiAssemblerSlice.Editor.Review
         private string ElementTreePath => Path.Combine(RepoRoot, ".cache", "element-tree.json");
         private string MatchResultPath => Path.Combine(RepoRoot, ".cache", "match-result.json");
         private string ElementThumbnailsPath => Path.Combine(RepoRoot, ".cache", "element-thumbnails.json");
+        private string ElementFallbackCapturesPath => Path.Combine(RepoRoot, ".cache", "element-fallback-captures.json");
 
         private static string ResolvePath(string userPath, string repoRoot)
         {
@@ -221,6 +224,9 @@ namespace UiAssemblerSlice.Editor.Review
                 _elementThumbnails = File.Exists(ElementThumbnailsPath)
                     ? AssemblerJson.LoadElementThumbnails(ElementThumbnailsPath)
                     : new Dictionary<string, string>();
+                _elementFallbackCaptures = File.Exists(ElementFallbackCapturesPath)
+                    ? AssemblerJson.LoadElementFallbackCaptures(ElementFallbackCapturesPath)
+                    : new Dictionary<string, string>();
 
                 _elementById = new Dictionary<string, ElementData>();
                 FlattenElements(_elementTree.Elements, _elementById);
@@ -272,7 +278,13 @@ namespace UiAssemblerSlice.Editor.Review
             EditorGUILayout.BeginHorizontal("box");
 
             _elementById.TryGetValue(row.ElementId, out var element);
-            DrawPreviewBox(GetElementPreview(element));
+            // fallback_eligible: the small selection thumbnail is less
+            // useful here than the real hi-res capture that's the whole
+            // reason this row exists - show that instead when available.
+            var leftPreview = row.Status == "fallback_eligible"
+                ? GetFallbackCapturePreview(element) ?? GetElementPreview(element)
+                : GetElementPreview(element);
+            DrawPreviewBox(leftPreview);
 
             EditorGUILayout.BeginVertical(GUILayout.Width(160));
             GUILayout.Label(row.ElementId, EditorStyles.boldLabel);
@@ -297,6 +309,10 @@ namespace UiAssemblerSlice.Editor.Review
             GUI.enabled = true;
             if (GUILayout.Button("Reassign", GUILayout.Width(70))) ShowReassignMenu(row);
 
+            GUI.enabled = row.Status == "fallback_eligible";
+            if (GUILayout.Button("Import as New Asset", GUILayout.Width(140))) ImportFallbackAsset(row);
+
+            GUI.enabled = true;
             EditorGUILayout.EndHorizontal();
         }
 
@@ -313,6 +329,7 @@ namespace UiAssemblerSlice.Editor.Review
             if (status == "matched") color = new Color(0.35f, 0.75f, 0.35f);
             else if (status == "uncertain") color = new Color(0.9f, 0.65f, 0.15f);
             else if (status == "missing") color = new Color(0.85f, 0.3f, 0.3f);
+            else if (status == "fallback_eligible") color = new Color(0.55f, 0.45f, 0.9f);
             else color = Color.gray;
             style.normal.textColor = color;
             return style;
@@ -358,6 +375,94 @@ namespace UiAssemblerSlice.Editor.Review
             Repaint();
         }
 
+        // Imports a fallback_eligible row's hi-res Combine-group capture as
+        // a real, reusable catalog entry - same reasoning as
+        // NodeBuilder.SaveCompositedSprite for why this must be a real file
+        // on disk (AssetImportHelpers.ImportPngAsSprite), not an in-memory
+        // Sprite. Reuses the exact same discovery/probe/thumbnail pieces
+        // RunCatalogBuild.cs's own per-asset loop uses (DiscoveredAsset,
+        // RenderMetadataProbe.Probe, RenderedThumbnail.RenderToPngBytes) -
+        // confirmed via exploration these already handle a plain,
+        // freshly-imported PNG with no 9-slice/tint data gracefully
+        // (reports Simple/no-border/no-tint, no special-casing needed).
+        private void ImportFallbackAsset(MatchResultEntry row)
+        {
+            try
+            {
+                if (!_elementById.TryGetValue(row.ElementId, out var element) || element.FigmaNodeId == null)
+                {
+                    throw new InvalidOperationException($"no element/figma_node_id found for '{row.ElementId}'");
+                }
+                if (!_elementFallbackCaptures.TryGetValue(element.FigmaNodeId, out var dataUri))
+                {
+                    throw new InvalidOperationException($"no fallback capture found for '{row.ElementId}'");
+                }
+
+                var comma = dataUri.IndexOf(',');
+                var bytes = Convert.FromBase64String(comma >= 0 ? dataUri.Substring(comma + 1) : dataUri);
+
+                var safeId = string.Join("_", element.Id.Split(Path.GetInvalidFileNameChars()));
+                const string assetFolder = "Assets/_Generated/UIAssembler/FallbackAssets";
+                var assetPath = $"{assetFolder}/{safeId}.png";
+                AssetImportHelpers.ImportPngAsSprite(assetPath, bytes);
+
+                var asset = new DiscoveredAsset(assetPath, AssetDatabase.AssetPathToGUID(assetPath), "sprite", Array.Empty<string>());
+                var metadata = RenderMetadataProbe.Probe(asset);
+
+                // Same catalogAbs LoadReviewData resolved _catalog from -
+                // recomputed identically (deterministic given _catalogPath
+                // is unchanged since load) so the appended entry lands in
+                // the exact same file the rest of this window is using.
+                var repoRoot = RepoRoot;
+                var catalogAbs = ResolvePath(_catalogPath, repoRoot) ?? Path.Combine(repoRoot, ".cache", "catalog.json");
+                var catalogDir = Path.GetDirectoryName(catalogAbs);
+
+                // "Fallback__" prefix avoids colliding with feature-folder-
+                // derived ids (RunCatalogBuild.cs's "<feature>__<name>"
+                // convention) - this entry's "feature" is this import
+                // action, not a scanned folder.
+                var newId = $"Fallback__{safeId}";
+                const int canonicalThumbnailSize = 256; // matches RunCatalogBuild.cs's own constant
+                var thumbnailBytes = RenderedThumbnail.RenderToPngBytes(asset, metadata, canonicalThumbnailSize);
+                var thumbnailRelativePath = $"thumbnails/{newId}.png";
+                var thumbnailAbsolutePath = Path.Combine(catalogDir, "thumbnails", $"{newId}.png");
+                Directory.CreateDirectory(Path.GetDirectoryName(thumbnailAbsolutePath));
+                File.WriteAllBytes(thumbnailAbsolutePath, thumbnailBytes);
+
+                var entry = CatalogAppender.BuildSpriteEntry(newId, assetPath, "Fallback", metadata, thumbnailRelativePath);
+                CatalogAppender.AppendEntry(catalogAbs, entry);
+
+                // Update in-memory state too, so it's usable without a
+                // reload (same convention as Reassign, just for a brand-new
+                // id the picker didn't have until now).
+                var newCatalogEntry = new CatalogEntryData
+                {
+                    Id = newId,
+                    Path = assetPath,
+                    Type = "sprite",
+                    ImageType = metadata.ImageType,
+                    PpuMultiplier = metadata.PpuMultiplier,
+                    Border = metadata.Border,
+                    TintHex = metadata.TintHex,
+                    ThumbnailPath = thumbnailAbsolutePath,
+                };
+                _catalog.Add(newCatalogEntry);
+                _catalogById[newId] = newCatalogEntry;
+
+                row.MatchedAssetId = newId;
+                row.Status = "matched";
+                row.RawResize = null;
+
+                _statusMessage = $"Imported '{newId}' - added to catalog and matched to '{row.ElementId}'";
+                Repaint();
+            }
+            catch (Exception ex)
+            {
+                _statusMessage = $"Import fallback asset failed: {ex.Message}";
+                Debug.LogException(ex);
+            }
+        }
+
         private Texture2D GetElementPreview(ElementData element)
         {
             if (element?.FigmaNodeId == null) return null;
@@ -365,10 +470,17 @@ namespace UiAssemblerSlice.Editor.Review
             return GetOrDecode("elem:" + element.FigmaNodeId, dataUri);
         }
 
+        private Texture2D GetFallbackCapturePreview(ElementData element)
+        {
+            if (element?.FigmaNodeId == null) return null;
+            if (!_elementFallbackCaptures.TryGetValue(element.FigmaNodeId, out var dataUri)) return null;
+            return GetOrDecode("fallback:" + element.FigmaNodeId, dataUri);
+        }
+
         private Texture2D GetCatalogPreview(CatalogEntryData entry)
         {
-            if (entry?.Thumbnail == null) return null;
-            return GetOrDecode("cat:" + entry.Id, entry.Thumbnail);
+            if (entry?.ThumbnailPath == null) return null;
+            return GetOrLoad("cat:" + entry.Id, entry.ThumbnailPath);
         }
 
         private Texture2D GetOrDecode(string key, string dataUri)
@@ -376,6 +488,45 @@ namespace UiAssemblerSlice.Editor.Review
             if (_textureCache.TryGetValue(key, out var cached) && cached != null) return cached;
             var tex = DecodeDataUriToTexture(dataUri);
             _textureCache[key] = tex;
+            return tex;
+        }
+
+        // Catalog thumbnails are files on disk now, not inline base64 (see
+        // catalog-entry.schema.json's thumbnail_path / HANDOFF.md's
+        // "Incremental catalog rebuild" - a real project's catalog can run
+        // to thousands of entries, too much to keep inline in JSON).
+        // AssemblerJson.LoadCatalog already resolved entry.ThumbnailPath to
+        // an absolute path, so this just reads it.
+        private Texture2D GetOrLoad(string key, string absolutePath)
+        {
+            if (_textureCache.TryGetValue(key, out var cached) && cached != null) return cached;
+            var tex = LoadTextureFromFile(absolutePath);
+            _textureCache[key] = tex;
+            return tex;
+        }
+
+        private static Texture2D LoadTextureFromFile(string path)
+        {
+            if (string.IsNullOrEmpty(path) || !File.Exists(path)) return null;
+
+            byte[] bytes;
+            try
+            {
+                bytes = File.ReadAllBytes(path);
+            }
+            catch (IOException)
+            {
+                return null;
+            }
+
+            // hideFlags: same reasoning as DecodeDataUriToTexture below -
+            // scratch Editor-only preview textures, never project assets.
+            var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false) { hideFlags = HideFlags.HideAndDontSave };
+            if (!tex.LoadImage(bytes, markNonReadable: false))
+            {
+                UnityEngine.Object.DestroyImmediate(tex);
+                return null;
+            }
             return tex;
         }
 

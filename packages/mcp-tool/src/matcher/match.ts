@@ -11,7 +11,6 @@
 
 import type { CatalogEntry, ElementTree, MatchResult } from "@ui-assembler-slice/contracts";
 import { candidates } from "./candidates.js";
-import { compositeVisualSignals } from "./composite-visual-signal.js";
 import type { FrameMeta } from "./element-crop.js";
 import { gate, type ScoredCandidate } from "./gate.js";
 import { structuralSignal } from "./structural-signal.js";
@@ -22,6 +21,14 @@ type Element = ElementTree["elements"][number];
 export interface MatchElementTreeOptions extends VisualSignalOptions {
   topK?: number;
   onProgress?: (done: number, total: number, elementId: string) => void;
+  // figma_node_ids with a real hi-res Combine-group capture available (see
+  // reduce-from-selection.ts's fallbackCaptures / cli.ts's
+  // element-fallback-captures.json) - a composite element that scores
+  // "missing" against the existing catalog gets flagged
+  // "fallback_eligible" instead when its figma_node_id is in this set, so
+  // Stage 3 review can offer importing the capture as a new catalog entry
+  // rather than just reporting a plain miss.
+  fallbackCaptureIds?: Set<string>;
 }
 
 // Figma nodes reduced to type "text" become TextMeshPro objects
@@ -33,88 +40,47 @@ function isMatchable(element: Element): boolean {
   return element.type !== "text";
 }
 
-// The signal that a parent's children are a composite group (see
-// composite-visual-signal.ts) rather than an ordinary layout grouping: an
-// explicit flag (element-tree.schema.json's `composite`), set by whoever
-// authors the tree (originally the hand-labeled golden fixture; the planned
-// Figma-plugin selection UI's "Combine" action going forward), not inferred
-// from geometry. Composite layers are NOT guaranteed to share an identical
-// rect - button_x's real Figma geometry (frame/base/icon, corrected from
-// earlier placeholder identical rects, see HANDOFF.md) turned out to be 3
-// different, nested rects, which silently broke an earlier rect-equality
-// version of this check. Ordinary grouping containers (a row/column of
-// distinct sub-elements) keep the plain per-element path via recursion.
+// The signal that a parent's children are a composite (Figma plugin
+// "Combine") group rather than an ordinary layout grouping: an explicit
+// flag (element-tree.schema.json's `composite`), set by whoever authors the
+// tree, not inferred from geometry. Composite layers are NOT guaranteed to
+// share an identical rect - button_x's real Figma geometry (frame/base/
+// icon) turned out to be 3 different, nested/overlapping rects, which is
+// exactly why a composite group is matched as ONE unit against its own
+// rect/crop (below) rather than decomposed into its children: an earlier
+// design decomposed composite children into N separately-matched leaves
+// scored via a shared joint crop, but real data showed even genuinely-
+// correct-per-layer cases (button_x's 3 real, separate, already-existing
+// catalog sprites) score wrong or too low that way, because each child's
+// own crop is contaminated by its overlapping siblings. Matching the WHOLE
+// group as one element against its own rect - same as any ordinary element
+// - sidesteps that entirely. If nothing in the existing catalog scores well
+// enough, `fallbackCaptureIds` (see MatchElementTreeOptions) is how a
+// human-captured real image for the group gets a second chance instead of
+// a plain miss - see the "fallback_eligible" handling in the main loop.
 function isCompositeGroup(element: Element): boolean {
   return element.composite === true && element.children.length > 1;
 }
 
-// A single Figma node can correspond to more than one catalog asset - one
-// real example: the mockup's "button_x" close button is ONE Figma layer but
-// is actually assembled in Unity from three separate sprites (frame + a
-// backing layer + the X icon glyph), discovered while investigating why the
-// matcher couldn't find a single asset that looked right for it.
-// element-tree.schema.json already supports this via `children` (a child is
-// just another full element, recursively) - no signal-function changes
-// needed, candidates()/structuralSignal()/visualSignal()/gate() are all
-// already element-shape-agnostic. What's needed is this: an element WITH
-// children is treated as a pure grouping container and is not matched
-// directly (matching "the whole composite" against one catalog entry
-// doesn't make sense) - only its children (recursively) are matched. A
-// childless element is matched directly, same as before this existed.
-//
-// Composite children (marked via the explicit `composite` flag, e.g.
-// button_x's three) additionally need JOINT visual scoring, not just
-// independent per-child matching - cropElementFromFrame crops by rect, so
-// naively all of them would get the identical full-composite crop (all
-// layers visible at once), and comparing that against any ONE child's
-// isolated candidate render is comparing a whole picture to one of its
-// layers. isCompositeGroup/compositeVisualSignals (composite-visual-
-// signal.ts) handle this: structuralSignal still runs per-child as normal
-// (text-based, unaffected by the shared crop), but visual scoring
-// composites candidate renders from ALL of a group's children together and
-// compares the WHOLE composite against the shared crop. Ordinary grouping
-// containers (not flagged composite) don't have this problem and keep the
-// plain per-element path via recursion.
-//
-// KNOWN GAP, not fixed here: compositeVisualSignals still derives its
-// shared crop/target size from children[0].rect alone (composite-visual-
-// signal.ts), i.e. it still implicitly assumes the first child's rect
-// approximates the whole group's bounds. That held by coincidence for
-// button_x's original placeholder rects but no longer holds exactly for its
-// corrected real ones (see HANDOFF.md) - correct today only because the
-// children happen to be concentric/overlapping enough not to visibly break
-// scoring. A composite group whose layers extend in genuinely different
-// directions (not just different sizes) would need that function to crop
-// from the union of all children's rects instead - real follow-on work,
-// out of scope for this change (detection only).
-//
-// This does NOT make reduce.ts itself produce decomposed children for
-// composite templates like this automatically - it doesn't know which
-// Figma component instances need decomposing. That's real, unsolved future
-// work (see HANDOFF.md) - this only makes the matcher correctly handle a
-// tree that already has children populated and explicitly flagged (as the
-// hand-labeled golden fixture now does for button_x, and the planned
-// Figma-plugin selection UI's "Combine" action will do going forward).
-type WorkItem = { kind: "single"; element: Element } | { kind: "composite"; children: Element[] };
-
-function collectWorkItems(elements: Element[]): WorkItem[] {
-  const result: WorkItem[] = [];
+// A composite group's `children` still carry real sub-layer geometry/ids
+// (useful provenance - e.g. NodeBuilder.cs could one day use them for
+// per-layer debugging), but are never matched individually - only the
+// group's own wrapper element is. Ordinary (non-composite) grouping
+// containers have no single catalog entry that represents "the whole
+// group," so they're never matched directly either - only their children,
+// recursively.
+function collectWorkItems(elements: Element[]): Element[] {
+  const result: Element[] = [];
   for (const element of elements) {
-    if (element.children.length > 0) {
-      if (isCompositeGroup(element)) {
-        result.push({ kind: "composite", children: element.children.filter(isMatchable) });
-      } else {
-        result.push(...collectWorkItems(element.children));
-      }
+    if (isCompositeGroup(element)) {
+      if (isMatchable(element)) result.push(element);
+    } else if (element.children.length > 0) {
+      result.push(...collectWorkItems(element.children));
     } else if (isMatchable(element)) {
-      result.push({ kind: "single", element });
+      result.push(element);
     }
   }
   return result;
-}
-
-function workItemSize(item: WorkItem): number {
-  return item.kind === "composite" ? item.children.length : 1;
 }
 
 export async function matchElementTree(
@@ -130,55 +96,41 @@ export async function matchElementTree(
   };
 
   const workItems = collectWorkItems(elementTree.elements);
-  const total = workItems.reduce((sum, item) => sum + workItemSize(item), 0);
+  const total = workItems.length;
   const results: MatchResult = [];
   let done = 0;
 
-  // Sequential across elements/groups, parallel (bounded by topK, ~10)
-  // across candidates within one element - keeps peak concurrent work
-  // bounded without needing a general-purpose concurrency limiter, which a
-  // ~10-15-element slice-scale run doesn't need.
-  for (const item of workItems) {
-    if (item.kind === "composite") {
-      // Composite group (see composite-visual-signal.ts): children stacked
-      // at the same rect, so each child's visual score has to come from how
-      // the whole group looks composited together, not from comparing one
-      // isolated layer's render against the full-group crop.
-      const candidatesPerChild = item.children.map((child) => candidates(child, catalog, options.topK));
-      const structuralPerChild = candidatesPerChild.map((cands, i) =>
-        cands.map((candidate) => structuralSignal(item.children[i], candidate)),
-      );
-      const visualPerChild = await compositeVisualSignals(
-        item.children,
-        frame,
-        candidatesPerChild,
-        structuralPerChild,
-        options,
-      );
-      for (let i = 0; i < item.children.length; i++) {
-        const scoredCandidates: ScoredCandidate[] = candidatesPerChild[i].map((candidate, k) => ({
-          candidate,
-          structural: structuralPerChild[i][k],
-          visual: visualPerChild[i][k],
-        }));
-        results.push(gate(item.children[i], scoredCandidates));
-        done++;
-        options.onProgress?.(done, total, item.children[i].id);
-      }
-    } else {
-      const element = item.element;
-      const topCandidates = candidates(element, catalog, options.topK);
-      const scoredCandidates: ScoredCandidate[] = await Promise.all(
-        topCandidates.map(async (candidate) => ({
-          candidate,
-          structural: structuralSignal(element, candidate),
-          visual: await visualSignal(element, frame, candidate, options),
-        })),
-      );
-      results.push(gate(element, scoredCandidates));
-      done++;
-      options.onProgress?.(done, total, element.id);
+  // Sequential across elements, parallel (bounded by topK, ~10) across
+  // candidates within one element - keeps peak concurrent work bounded
+  // without needing a general-purpose concurrency limiter, which a
+  // ~10-15-element slice-scale run doesn't need. Composite groups (see
+  // isCompositeGroup) go through this exact same path, matched as one unit
+  // against their own rect - no separate branch needed anymore.
+  for (const element of workItems) {
+    const topCandidates = candidates(element, catalog, options.topK);
+    const scoredCandidates: ScoredCandidate[] = await Promise.all(
+      topCandidates.map(async (candidate) => ({
+        candidate,
+        structural: structuralSignal(element, candidate),
+        visual: await visualSignal(element, frame, candidate, options),
+      })),
+    );
+    let result = gate(element, scoredCandidates);
+    if (
+      result.status === "missing" &&
+      element.composite === true &&
+      options.fallbackCaptureIds?.has(element.figma_node_id)
+    ) {
+      // No existing catalog entry scored well enough, but a real
+      // hi-res capture of this Combine group exists (see
+      // MatchElementTreeOptions.fallbackCaptureIds) - flag it for a human
+      // to import as a new catalog entry in Stage 3 review instead of
+      // reporting a plain, dead-end miss.
+      result = { ...result, status: "fallback_eligible" };
     }
+    results.push(result);
+    done++;
+    options.onProgress?.(done, total, element.id);
   }
 
   return results;

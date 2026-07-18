@@ -52,6 +52,18 @@ namespace UiAssemblerSlice.Editor.Catalog
     {
         public static string RenderToBase64Png(DiscoveredAsset asset, RenderMetadata metadata, int canonicalSize)
         {
+            var png = RenderToPngBytes(asset, metadata, canonicalSize);
+            return "data:image/png;base64," + Convert.ToBase64String(png);
+        }
+
+        // Raw PNG bytes - what RunCatalogBuild.cs writes straight to a
+        // thumbnail file on disk (catalog.json stores a path, not inline
+        // base64, since a real project's catalog can run to thousands of
+        // entries - see HANDOFF.md's "Incremental catalog rebuild" /
+        // thumbnail-file-path sections). RenderToBase64Png above is now a
+        // thin wrapper, kept for SmokeTest.RunRenderProbe's direct use.
+        public static byte[] RenderToPngBytes(DiscoveredAsset asset, RenderMetadata metadata, int canonicalSize)
+        {
             var fitted = asset.AssetType == "prefab"
                 ? RenderPrefabHierarchy(asset, metadata, canonicalSize)
                 : RenderSprite(asset, metadata, canonicalSize);
@@ -67,8 +79,7 @@ namespace UiAssemblerSlice.Editor.Catalog
                         fitted.width, fitted.height, fitted.GetPixels());
                     canvas.Apply();
 
-                    var png = canvas.EncodeToPNG();
-                    return "data:image/png;base64," + Convert.ToBase64String(png);
+                    return canvas.EncodeToPNG();
                 }
                 finally
                 {

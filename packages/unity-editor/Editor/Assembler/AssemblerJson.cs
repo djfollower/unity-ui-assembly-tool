@@ -318,6 +318,12 @@ namespace UiAssemblerSlice.Editor.Assembler
         public RectData Rect;
         public string TextContent; // null if absent
         public bool Container; // true: build children as real nested GameObjects, not flattened
+        // true: matched as ONE unit (see match.ts's isCompositeGroup) - its
+        // `Children` are real sub-layer geometry kept for provenance, but
+        // NOT built individually; NodeBuilder.BuildRecursive checks this
+        // before Container/Children.Count, since a composite element can
+        // (and typically does) still carry children.
+        public bool Composite;
         public List<ElementData> Children = new List<ElementData>();
     }
 
@@ -389,7 +395,11 @@ namespace UiAssemblerSlice.Editor.Assembler
         public float PpuMultiplier;
         public float[] Border; // [left, bottom, right, top], texture pixels; null for Simple entries
         public string TintHex; // null if untinted
-        public string Thumbnail; // base64 "data:image/png;base64,..." - review-window preview only
+        // Absolute path - LoadCatalog resolves it (on-disk it's relative to
+        // catalog.json's own directory, see catalog-entry.schema.json)
+        // before returning it, so nothing downstream needs to know where
+        // catalog.json physically lives. Review-window preview only.
+        public string ThumbnailPath;
     }
 
     public static class AssemblerJson
@@ -429,6 +439,7 @@ namespace UiAssemblerSlice.Editor.Assembler
                         (float)(double)rect["h"]),
                     TextContent = obj.TryGetValue("text_content", out var text) ? (string)text : null,
                     Container = obj.TryGetValue("container", out var containerVal) && containerVal is bool containerBool && containerBool,
+                    Composite = obj.TryGetValue("composite", out var compositeVal) && compositeVal is bool compositeBool && compositeBool,
                     Children = ParseElements((List<object>)obj["children"]),
                 });
             }
@@ -457,6 +468,11 @@ namespace UiAssemblerSlice.Editor.Assembler
         public static List<CatalogEntryData> LoadCatalog(string path)
         {
             var root = (List<object>)JsonParser.Parse(File.ReadAllText(path));
+            // thumbnail_path on disk is relative to catalog.json's own
+            // directory (not the repo root or the Unity project) - resolved
+            // to absolute here, once, at this load chokepoint, same
+            // convention as the Node side's loadCatalog().
+            var catalogDir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".";
             var result = new List<CatalogEntryData>();
             foreach (var item in root)
             {
@@ -471,7 +487,8 @@ namespace UiAssemblerSlice.Editor.Assembler
                     PpuMultiplier = (float)(double)render["ppu_multiplier"],
                     Border = ((List<object>)render["border"]).Select(b => (float)(double)b).ToArray(),
                     TintHex = render.TryGetValue("tint", out var tint) ? tint as string : null,
-                    Thumbnail = (string)obj["thumbnail"], // top-level sibling of "render", required
+                    // top-level sibling of "render", required
+                    ThumbnailPath = Path.GetFullPath(Path.Combine(catalogDir, (string)obj["thumbnail_path"])),
                 });
             }
             return result;
@@ -482,6 +499,19 @@ namespace UiAssemblerSlice.Editor.Assembler
         // of any schema (deliberately - review-UI concern, not something
         // match.ts/NodeBuilder.cs need to know about).
         public static Dictionary<string, string> LoadElementThumbnails(string path)
+        {
+            var root = (Dictionary<string, object>)JsonParser.Parse(File.ReadAllText(path));
+            var result = new Dictionary<string, string>();
+            foreach (var kvp in root) result[kvp.Key] = kvp.Value as string;
+            return result;
+        }
+
+        // Mirrors LoadElementThumbnails exactly - same flat figma_node_id ->
+        // base64 data URI shape (see cli.ts's element-fallback-captures.json
+        // sidecar), same "caller checks File.Exists first" convention (a
+        // plugin export from before this feature, or one where no Combine
+        // group got a real anchor, produces an empty sidecar with no error).
+        public static Dictionary<string, string> LoadElementFallbackCaptures(string path)
         {
             var root = (Dictionary<string, object>)JsonParser.Parse(File.ReadAllText(path));
             var result = new Dictionary<string, string>();

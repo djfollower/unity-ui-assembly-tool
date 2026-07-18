@@ -13,6 +13,12 @@ FEATURE_FOLDER="${FEATURE_FOLDER:-Assets/Textures/UI/UI Elements}"
 EXTRA_PREFAB_PATHS="${EXTRA_PREFAB_PATHS:-Assets/Prefabs/UI/ButtonFrame.prefab,Assets/Prefabs/UI/ButtonFrameTint.prefab,Assets/Prefabs/UI/Scrim.prefab}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_PATH="${OUTPUT_PATH:-$REPO_ROOT/.cache/catalog.json}"
+CACHE_PATH="${CACHE_PATH:-$REPO_ROOT/.cache/catalog-build-cache.json}"
+# Skips the incremental build cache entirely, re-probing/re-rendering every
+# asset - set FORCE_FULL=true after changing RunCatalogBuild.cs/RenderMetadataProbe.cs/
+# RenderedThumbnail.cs themselves (a code change the cache's per-asset
+# content hash can't see), or if the cache is ever suspected stale.
+FORCE_FULL="${FORCE_FULL:-false}"
 LOG_PATH="${LOG_PATH:-$REPO_ROOT/scripts/logs/build-catalog.log}"
 
 mkdir -p "$(dirname "$OUTPUT_PATH")" "$(dirname "$LOG_PATH")"
@@ -24,8 +30,11 @@ mkdir -p "$(dirname "$OUTPUT_PATH")" "$(dirname "$LOG_PATH")"
   -featureFolder "$FEATURE_FOLDER" \
   -extraPrefabPaths "$EXTRA_PREFAB_PATHS" \
   -outputPath "$OUTPUT_PATH" \
+  -cachePath "$CACHE_PATH" \
+  -forceFull "$FORCE_FULL" \
   -quit \
   -logFile "$LOG_PATH"
 
 echo "catalog.json: $OUTPUT_PATH"
+echo "build cache: $CACHE_PATH"
 echo "log: $LOG_PATH"

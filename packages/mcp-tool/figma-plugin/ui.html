@@ -155,6 +155,7 @@
   let typeTags = new Map(); // id -> tag string, only for checked non-text nodes
   let expanded = new Set(); // ids whose children are currently shown
   let thumbnails = new Map(); // id -> dataUri | "loading" | "error"
+  let combinedExports = new Map(); // groupId -> dataUri | "error", see captureCombinedHiRes (code.js)
 
   let combineMode = false;
   let pendingCombine = new Set();
@@ -308,14 +309,24 @@
 
     // Anything that will get its own match-result row downstream needs a
     // preview image for Stage 3's review screen - not just checked nodes,
-    // but composite-group members too (individually scored per-child even
-    // though they're picked via Combine, not their own checkbox). Omitted
-    // (not null) when no thumbnail resolved yet - a rare pre-resolution
-    // race, not worth blocking export over; the review screen already
-    // treats a missing preview as an acceptable gap.
+    // but composite-group members too (their group gets one review row,
+    // but which member ends up as the emission point is decided Node-side
+    // in reduce-from-selection.ts, not knowable here). Omitted (not null)
+    // when no thumbnail resolved yet - a rare pre-resolution race, not
+    // worth blocking export over; the review screen already treats a
+    // missing preview as an acceptable gap.
     if (out.selected || node.compositeGroupId) {
       const thumb = thumbnails.get(node.id);
       if (typeof thumb === "string" && thumb.startsWith("data:")) out.thumbnail = thumb;
+    }
+
+    // Attached redundantly to every member of the group (same approach as
+    // `thumbnail` above) - reduce-from-selection.ts's fallbackCaptures
+    // plucks it off whichever member ends up as the emission point, so no
+    // extra bookkeeping is needed here about which one that'll be.
+    if (node.compositeGroupId) {
+      const capture = combinedExports.get(node.compositeGroupId);
+      if (typeof capture === "string" && capture.startsWith("data:")) out.combinedHiResExport = capture;
     }
 
     if (node.children) out.children = node.children.map(buildExportNode);
@@ -445,6 +456,22 @@
         if (node) delete node.compositeGroupId;
       });
       render();
+      return;
+    }
+
+    // No dedicated UI indicator for these (unlike thumbnail/thumbnailError,
+    // which patch a visible slot) - just recorded for buildExportNode to
+    // pick up whenever the user clicks Download. A failed/no-anchor capture
+    // (see code.js's captureCombinedHiRes) means that group's export simply
+    // has no combinedHiResExport field, same as if Combine were never used
+    // for hi-res purposes at all - not a fatal error for the whole export.
+    if (msg.type === "combinedExport") {
+      combinedExports.set(msg.groupId, msg.dataUri);
+      return;
+    }
+    if (msg.type === "combinedExportError") {
+      combinedExports.set(msg.groupId, "error");
+      console.warn(`combinedExport failed for group ${msg.groupId}: ${msg.message}`);
       return;
     }
   };

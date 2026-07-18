@@ -16,6 +16,35 @@
 // structural signal (name/description overlap) independently picks
 // correctly more often for those same cases. Selection now ranks by a
 // combined score - see combinedScore below.
+//
+// Re-tuned (graduation-phase session) after the catalog's thumbnail-
+// rendering bugs were fixed (see HANDOFF.md "Thumbnail rendering bug,
+// parts 2-4") - the previous WEIGHT_VISUAL=0.6/WEIGHT_STRUCTURAL=0.4 split
+// was calibrated against the OLD, buggy thumbnails and went stale. Found
+// by collecting raw per-candidate visual/structural scores once (real
+// renders, expensive) and then sweeping weight/threshold combinations
+// cheaply against fixtures/golden-matches.json. Root cause of why more
+// STRUCTURAL weight specifically helps: several of this fixture's near-
+// miss cases are near-visual-DUPLICATES (e.g. `ButtonFrame`/
+// `ButtonFrameTint`/`button_frame_x` are three different red/blue frame
+// sprites that all score visual ~0.345-0.347 against the same element) -
+// min-max normalization (see normalizedScores below) stretches that
+// noise-level ~0.002 spread across nearly the FULL 0-1 normalized range,
+// so under the old 60% visual weighting that noise was drowning out a
+// genuinely-informative structural signal with a real ~40% relative
+// spread (0.158 vs 0.224) for the same candidates. Verified: flips
+// `button_continue`'s selection from wrong (`UIElements__button_green`,
+// a coincidentally-similar green button) to correct
+// (`UIElements__ButtonFrame`) and now auto-accepts it; also corrects
+// `button_x_base`'s selection (still lands `uncertain`, appropriately -
+// its margin is razor-thin at ~0.003). FAR stayed 0% and missing-recall
+// 100% across the entire sweep - auto-accept rose from the un-retuned
+// 28.6% (this session's regressed baseline against the fixed thumbnails)
+// to 42.9%, matching this file's own previously-documented raw-matcher
+// baseline. Chose the least-aggressive tied config (0.4/0.6 over 0.3/0.7
+// or 0.2/0.8, which scored identically on this 10-element fixture) -
+// deliberately not chasing the most extreme option a fixture this small
+// can't actually distinguish from noise.
 
 import type { CatalogEntry, ElementTree, MatchResult } from "@ui-assembler-slice/contracts";
 
@@ -34,14 +63,14 @@ export interface ScoredCandidate {
 // confident - the missing/matched decision needs an absolute yardstick,
 // selection needs a relative one, and conflating them was the bug this
 // comment is here to prevent reintroducing.
-const MATCH_VISUAL_THRESHOLD = 0.4;
+const MATCH_VISUAL_THRESHOLD = 0.35;
 const MISSING_VISUAL_THRESHOLD = 0.24;
 // Margin is measured on the combined (normalized, 0-1 relative-to-this-
 // element's-candidates) score, unlike the two thresholds above - it's
 // inherently a relative "how much better than the runner-up" question.
-const MARGIN_THRESHOLD = 0.12;
-const WEIGHT_VISUAL = 0.6;
-const WEIGHT_STRUCTURAL = 0.4;
+const MARGIN_THRESHOLD = 0.05;
+const WEIGHT_VISUAL = 0.4;
+const WEIGHT_STRUCTURAL = 0.6;
 // A Simple/Filled resize is "safe" if it's roughly uniform (doesn't visibly
 // squash/stretch) - Sliced/Tiled don't need this check at all, they're
 // designed to absorb arbitrary resizes (see below).

@@ -23,6 +23,7 @@ export interface IntermediateNode {
   typeTag?: string;
   compositeGroupId?: string;
   thumbnail?: string;
+  combinedHiResExport?: string;
   children: IntermediateNode[];
 }
 
@@ -57,6 +58,7 @@ function mapNode(
     typeTag: node.typeTag,
     compositeGroupId: node.compositeGroupId,
     thumbnail: node.thumbnail,
+    combinedHiResExport: node.combinedHiResExport,
     children: (node.children ?? []).map((child) => mapNode(child, origin)),
   };
 }

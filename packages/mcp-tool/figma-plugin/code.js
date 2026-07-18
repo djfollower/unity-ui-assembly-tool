@@ -105,6 +105,82 @@ async function handleConfirmCombine(nodeIds) {
     confirmedIds.push(id);
   }
   figma.ui.postMessage({ type: "combineConfirmed", groupId, nodeIds: confirmedIds });
+
+  await captureCombinedHiRes(groupId, confirmedIds);
+}
+
+// True when `potentialAncestor` is a real Figma ancestor of `node` (walking
+// up via .parent) - same anchor concept reduce-from-selection.ts detects
+// independently on the exported JSON tree, but needed here too since this
+// runs against live Figma nodes before any export happens.
+function isAncestor(potentialAncestor, node) {
+  let current = node.parent;
+  while (current) {
+    if (current.id === potentialAncestor.id) return true;
+    current = current.parent;
+  }
+  return false;
+}
+
+// A combine group's real anchor, if it has one - a member that's the Figma
+// parent (direct or indirect) of the others, e.g. button_x's parent
+// instance containing its frame/base/icon as children. Returns null for a
+// pure-sibling combine with no shared parent among its own members -
+// expected to be rare (see reduce-from-selection.ts's own comment on this).
+async function findAnchor(nodeIds) {
+  const nodes = [];
+  for (const id of nodeIds) {
+    const n = await figma.getNodeByIdAsync(id);
+    if (n) nodes.push(n);
+  }
+  for (const candidate of nodes) {
+    const isAncestorOfAnother = nodes.some((other) => other !== candidate && isAncestor(candidate, other));
+    if (isAncestorOfAnother) return candidate;
+  }
+  return null;
+}
+
+// Real-resolution capture of a Combine group, fired once at confirm time
+// (not lazily/eagerly the way the 64px thumbnails are) - the source image a
+// human can later import as a real new catalog asset in Stage 3 review if
+// the matcher can't find an existing one that scores well (see
+// reduce-from-selection.ts's fallbackCaptures / match.ts's
+// fallback_eligible status). Only supports groups with a real anchor - a
+// pure-sibling combine with no shared parent has no single exportable node
+// representing "the whole group," and is explicitly out of scope for this
+// pass: logged, not fatal, that group still gets composite: true normally,
+// just with no fallback capture available (same as today's plain "missing"
+// behavior, not a regression).
+async function captureCombinedHiRes(groupId, nodeIds) {
+  const anchor = await findAnchor(nodeIds);
+  if (!anchor) {
+    console.log(`captureCombinedHiRes: group ${groupId} has no anchor - hi-res capture skipped`);
+    return;
+  }
+  if (!("exportAsync" in anchor)) {
+    figma.ui.postMessage({ type: "combinedExportError", groupId, message: "anchor not exportable" });
+    return;
+  }
+
+  // Text stays a live TMPro object downstream, not baked pixels - hide any
+  // TEXT descendant of the anchor before exporting, restore regardless of
+  // outcome. No existing helper for this in the codebase before now.
+  const textDescendants = "findAll" in anchor ? anchor.findAll((n) => n.type === "TEXT" && n.visible !== false) : [];
+  const originalVisibility = textDescendants.map((n) => n.visible);
+  try {
+    for (const n of textDescendants) n.visible = false;
+    // No WIDTH/SCALE constraint, unlike the 64px thumbnail path in
+    // handleRequestThumbnails - real resolution is the whole point here.
+    const bytes = await anchor.exportAsync({ format: "PNG" });
+    const dataUri = `data:image/png;base64,${figma.base64Encode(bytes)}`;
+    figma.ui.postMessage({ type: "combinedExport", groupId, dataUri });
+  } catch (err) {
+    figma.ui.postMessage({ type: "combinedExportError", groupId, message: String((err && err.message) || err) });
+  } finally {
+    textDescendants.forEach((n, i) => {
+      n.visible = originalVisibility[i];
+    });
+  }
 }
 
 async function handleUncombine(groupId, nodeIds) {

@@ -52,7 +52,7 @@ const cases = [
           native_size: { w: 200, h: 80 },
           tint: "#C0392B",
         },
-        thumbnail: "data:image/png;base64,AAAA",
+        thumbnail_path: "thumbnails/common__btn_red.png",
         role: "base",
         interactive: true,
         visual_description: "red rounded button",

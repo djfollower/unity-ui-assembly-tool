@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.IO;
 using TMPro;
 using UiAssemblerSlice.Editor.Catalog;
 using UnityEditor;
@@ -73,7 +74,17 @@ namespace UiAssemblerSlice.Editor.Assembler
                 element.Rect.W,
                 element.Rect.H);
 
-            if (element.Children.Count > 0)
+            // A composite element (see match.ts's isCompositeGroup) is
+            // matched/built as ONE unit against its own rect - its
+            // `Children` are real sub-layer geometry kept for provenance
+            // (e.g. button_x's frame/base/icon), never built individually,
+            // since match-result.json only ever has an entry for the
+            // composite wrapper's own id, not its children's. Checked
+            // before Container/Children.Count below - a composite element
+            // typically DOES still carry children, but that's provenance,
+            // not a build instruction; falls straight through to the same
+            // leaf-matching path any childless element uses.
+            if (!element.Composite && element.Children.Count > 0)
             {
                 if (element.Container)
                 {
@@ -168,7 +179,7 @@ namespace UiAssemblerSlice.Editor.Assembler
                 var texture = AssetDatabase.LoadAssetAtPath<Texture2D>(entry.Path);
                 var composited = RenderSlicedToTexture(
                     texture, entry.Border, Mathf.RoundToInt(targetRect.W), Mathf.RoundToInt(targetRect.H));
-                image.sprite = Sprite.Create(composited, new Rect(0, 0, composited.width, composited.height), new Vector2(0.5f, 0.5f));
+                image.sprite = SaveCompositedSprite(entry.Id, composited);
                 image.type = Image.Type.Simple;
             }
             else
@@ -296,6 +307,38 @@ namespace UiAssemblerSlice.Editor.Assembler
                 RenderTexture.active = prevActive;
                 RenderTexture.ReleaseTemporary(rt);
             }
+        }
+
+        // RenderSlicedToTexture's result is a loose, runtime-only Texture2D
+        // with no AssetDatabase identity. Wrapping it directly in
+        // Sprite.Create() and assigning that to image.sprite LOOKS correct
+        // for the rest of this Editor session (the live component still
+        // holds the in-memory reference), but PrefabUtility.SaveAsPrefabAsset
+        // can only serialize references to real, persistent assets into the
+        // saved .prefab file - an object that was never registered with
+        // AssetDatabase has no GUID/fileID to write, so the reference comes
+        // out as a silent null (`m_Sprite: {fileID: 0}`) once the prefab is
+        // written to disk and reloaded fresh. Confirmed for real: a saved
+        // prefab's Sliced-type elements (button_x, button_frame_x, the
+        // composite Rectangle children) all serialized null, while its
+        // non-Sliced elements (icon_x, icon_heart, loaded directly via
+        // AssetDatabase.LoadAssetAtPath) serialized a real GUID reference in
+        // the same file. Fix: write the composited result out as a real PNG
+        // under the project and import it through the normal Sprite
+        // pipeline - same convention RenderedThumbnail.cs's file-based
+        // rewrite already uses for catalog thumbnails, for the identical
+        // reason (a file with a GUID survives; an in-memory object doesn't).
+        //
+        // Keyed by id + target size (not id alone) since the same catalog
+        // entry composites differently per element's target rect - a second
+        // element reusing the same entry at a different size needs its own
+        // file, not an overwrite/collision.
+        private static Sprite SaveCompositedSprite(string entryId, Texture2D composited)
+        {
+            const string folder = "Assets/_Generated/UIAssembler/CompositedSprites";
+            var safeId = string.Join("_", entryId.Split(Path.GetInvalidFileNameChars()));
+            var assetPath = $"{folder}/{safeId}_{composited.width}x{composited.height}.png";
+            return AssetImportHelpers.ImportPngAsSprite(assetPath, composited.EncodeToPNG());
         }
 
         private static void BuildText(ElementData element, Transform parent, RectData rect)

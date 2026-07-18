@@ -2,10 +2,13 @@
 // IntermediateNode tree already annotated with selected/typeTag/
 // compositeGroupId (the figma-plugin/ checkbox tree's export - see its
 // README), producing the same ReducedElement[] shape reduce.ts's LLM call
-// would, pre-normalization (feeds straight into normalize.ts, unchanged).
-// No naming discipline, no LLM cost - a human already made every real/
-// decorative/type/composite judgment call by clicking in the plugin; this
-// just turns that into the schema shape.
+// would (as `.elements`), pre-normalization (feeds straight into
+// normalize.ts, unchanged). No naming discipline, no LLM cost - a human
+// already made every real/decorative/type/composite judgment call by
+// clicking in the plugin; this just turns that into the schema shape.
+// Also returns `.fallbackCaptures` - any Combine group's real-resolution
+// capture (see code.js), keyed by figma_node_id, for match.ts's
+// missing -> fallback_eligible check.
 
 import type { ElementTree } from "@ui-assembler-slice/contracts";
 import type { IntermediateNode } from "./parse-tree.js";
@@ -63,8 +66,10 @@ interface GroupPartition {
   // Combine action doesn't prevent pathological picks, but this only ever
   // reads whichever member happens to have descendants among the others).
   anchor: IntermediateNode | null;
-  // Members that are NOT an ancestor of any other member - these are what
-  // actually gets individually matched (compositeVisualSignals-style).
+  // Members that are NOT an ancestor of any other member - real sub-layer
+  // geometry kept on the emitted composite element's `children` (useful
+  // provenance/debugging), but not matched individually - the whole group
+  // matches/builds as one unit, see buildCompositeElement.
   leaves: IntermediateNode[];
 }
 
@@ -103,7 +108,27 @@ function describeElement(node: IntermediateNode): string {
   return `${elementType(node)} - ${node.name}`;
 }
 
-export function reduceFromSelection(root: IntermediateNode): ReducedElement[] {
+export interface ReduceFromSelectionResult {
+  elements: ReducedElement[];
+  // figma_node_id -> base64 PNG data URI, one entry per composite group that
+  // got a real-resolution capture in the plugin (see code.js's
+  // handleConfirmCombine) - keyed by the SAME figma_node_id the
+  // corresponding composite element carries, so cli.ts can write it out
+  // alongside element-tree.json and match.ts can join on it later.
+  fallbackCaptures: Record<string, string>;
+}
+
+// A Combine group's hi-res capture (see code.js) is attached redundantly to
+// every member node sharing a compositeGroupId, not just one canonical
+// spot - the plugin doesn't know which member (if any) becomes the
+// emission point here. Check the anchor first (the common case), falling
+// back to whichever leaf happens to carry it.
+function pluckFallbackCapture(anchor: IntermediateNode | null, leaves: IntermediateNode[]): string | undefined {
+  return anchor?.combinedHiResExport ?? leaves.find((l) => l.combinedHiResExport)?.combinedHiResExport;
+}
+
+export function reduceFromSelection(root: IntermediateNode): ReduceFromSelectionResult {
+  const fallbackCaptures: Record<string, string> = {};
   const groups = collectGroups(root);
   const partitions = new Map<string, GroupPartition>();
   // Node id -> the groupId it belongs to, ONLY for the member Phase 2
@@ -163,9 +188,12 @@ export function reduceFromSelection(root: IntermediateNode): ReducedElement[] {
     if (!anchor) {
       // No anchor - a pure-sibling combine with no shared parent among its
       // members. Synthesize an identity instead of borrowing one member's.
+      const figmaNodeId = `combine:${groupId}`;
+      const capture = pluckFallbackCapture(anchor, leaves);
+      if (capture) fallbackCaptures[figmaNodeId] = capture;
       return {
         id: uniqueId(`combined_${groupId}`, groupId),
-        figma_node_id: `combine:${groupId}`,
+        figma_node_id: figmaNodeId,
         type: "other",
         rect: unionRect(leaves.map((l) => l.rect)),
         visual_description: `combined layers (${leaves.length})`,
@@ -187,6 +215,18 @@ export function reduceFromSelection(root: IntermediateNode): ReducedElement[] {
     const extraChildren = processChildren(anchor.children.filter((c) => !consumedIds.has(c.id)));
 
     if (extraChildren.length === 0) {
+      // A Combine group is matched/built as ONE flat unit, not decomposed
+      // into its members (see match.ts's isCompositeGroup and HANDOFF.md -
+      // this was revisited after button_x's frame/base/icon group showed
+      // that per-member matching against overlapping/nested crops produces
+      // wrong or below-threshold scores even when each member DOES have a
+      // correct existing catalog counterpart). Since there's nothing left
+      // to build as separate nested children, this does NOT also get
+      // container: true (unlike the "has extra children" branch below,
+      // whose container is structural - it holds genuinely separate
+      // sibling content, not this group's own members).
+      const capture = pluckFallbackCapture(anchor, leaves);
+      if (capture) fallbackCaptures[anchor.id] = capture;
       return {
         id: uniqueId(anchor.name, anchor.id),
         figma_node_id: anchor.id,
@@ -203,10 +243,17 @@ export function reduceFromSelection(root: IntermediateNode): ReducedElement[] {
     // container instead, holding a synthesized composite sub-element (the
     // true combined shapes, sized to their own union bounds, not the
     // anchor's full rect which also spans the extra content) alongside
-    // whatever else was found under it.
+    // whatever else was found under it. The combined sub-element is still
+    // matched/built as ONE flat unit (see the "no extra children" branch's
+    // comment above) - this container exists to preserve the genuinely
+    // separate extraChildren, not to keep the combined shapes as separate
+    // nested pieces.
+    const combinedFigmaNodeId = `combine:${groupId}`;
+    const combinedCapture = pluckFallbackCapture(anchor, leaves);
+    if (combinedCapture) fallbackCaptures[combinedFigmaNodeId] = combinedCapture;
     const combinedSubElement: ReducedElement = {
       id: uniqueId(`${anchor.name}_combined`, groupId),
-      figma_node_id: `combine:${groupId}`,
+      figma_node_id: combinedFigmaNodeId,
       type: elementType(anchor),
       rect: unionRect(leaves.map((l) => l.rect)),
       visual_description: describeElement(anchor),
@@ -271,5 +318,5 @@ export function reduceFromSelection(root: IntermediateNode): ReducedElement[] {
     return result;
   }
 
-  return processChildren(root.children);
+  return { elements: processChildren(root.children), fallbackCaptures };
 }

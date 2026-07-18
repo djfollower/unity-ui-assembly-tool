@@ -41,9 +41,9 @@ export interface CatalogEntry1 {
     tint: string | null;
   };
   /**
-   * Base64 data URI of the RENDERED asset (at canonical size, post 9-slice/tint), not the raw texture (R14).
+   * Path to a PNG file of the RENDERED asset (at canonical size, post 9-slice/tint), not the raw texture (R14) - relative to catalog.json's own directory, not the repo root or the Unity project.
    */
-  thumbnail: string;
+  thumbnail_path: string;
   /**
    * e.g. base, pressed, disabled — asset's role within its template family.
    */

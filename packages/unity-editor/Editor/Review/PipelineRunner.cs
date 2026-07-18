@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using UnityEditor;
 
 namespace UiAssemblerSlice.Editor.Review
@@ -82,6 +83,27 @@ namespace UiAssemblerSlice.Editor.Review
                 RedirectStandardError = true,
                 CreateNoWindow = true,
             };
+
+            // Unity's own process PATH (inherited by the child by default)
+            // is the GUI-launch environment, not the user's shell PATH - it
+            // won't contain an nvm-installed node's bin dir. That's enough
+            // to start an absolute-path npm binary (Process.Start doesn't
+            // need PATH for that), but npm's own script has a
+            // "#!/usr/bin/env node" shebang, and env resolves "node" via
+            // the CHILD process's PATH - so without this, npm launches fine
+            // and then immediately fails with exit 127 ("node: not found")
+            // the moment it tries to run itself. Prepending the resolved
+            // binary's own directory covers both node and npm, since nvm
+            // installs them side by side.
+            if (Path.IsPathRooted(fileName))
+            {
+                var binDir = Path.GetDirectoryName(fileName);
+                if (!string.IsNullOrEmpty(binDir))
+                {
+                    var existingPath = psi.EnvironmentVariables.ContainsKey("PATH") ? psi.EnvironmentVariables["PATH"] : "";
+                    psi.EnvironmentVariables["PATH"] = binDir + Path.PathSeparator + existingPath;
+                }
+            }
 
             _current = new Process { StartInfo = psi, EnableRaisingEvents = false };
             _current.OutputDataReceived += (_, e) => { if (e.Data != null) Enqueue(e.Data); };

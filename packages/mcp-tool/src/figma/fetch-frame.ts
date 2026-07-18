@@ -43,6 +43,11 @@ export interface FigmaNode {
   // Base64 PNG data URI captured by the plugin's Stage 1 exportAsync
   // thumbnails - a review-UI preview source, not used by matching itself.
   thumbnail?: string;
+  // Base64 PNG data URI of a Combine group's real-resolution capture (text
+  // children hidden before export), attached redundantly to every member
+  // node sharing a compositeGroupId - see reduce-from-selection.ts's
+  // fallbackCaptures plucking, the consumer of this field.
+  combinedHiResExport?: string;
   [key: string]: unknown;
 }
 

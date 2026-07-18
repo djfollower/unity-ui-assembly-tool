@@ -28,6 +28,7 @@
 // whatever canonical size T1.5 used, and self-consistent because that same
 // bounding box is what T1.5's own fit-to-square scale produced.
 
+import { readFile } from "node:fs/promises";
 import sharp from "sharp";
 import type { CatalogEntry } from "@ui-assembler-slice/contracts";
 
@@ -50,13 +51,6 @@ interface Border {
   top: number;
 }
 
-function decodeDataUri(dataUri: string): Buffer {
-  const match = dataUri.match(/^data:image\/\w+;base64,(.+)$/);
-  if (!match) {
-    throw new Error("renderCandidateAtSize: thumbnail is not a base64 data URI");
-  }
-  return Buffer.from(match[1], "base64");
-}
 
 // Bounding box of non-transparent pixels - see the module comment on why
 // this is measured rather than recomputed from canonicalSize/native_size.
@@ -185,7 +179,8 @@ export async function renderCandidateAtSize(
 ): Promise<Buffer> {
   const targetW = Math.max(1, Math.round(target.w));
   const targetH = Math.max(1, Math.round(target.h));
-  const thumbnail = decodeDataUri(candidate.thumbnail);
+  // Already resolved to an absolute path by loadCatalog() - see its comment.
+  const thumbnail = await readFile(candidate.thumbnail_path);
   const { bbox: contentBBox, imageWidth, imageHeight } = await detectContentBBox(thumbnail);
 
   if (candidate.render.image_type !== "Sliced") {
