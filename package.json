@@ -1,0 +1,13 @@
+{
+  "name": "ui-assembler-slice",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vertical slice: Figma mockup -> Unity prefab. See README.md.",
+  "workspaces": [
+    "packages/contracts",
+    "packages/mcp-tool"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=@ui-assembler-slice/contracts && npm run build --workspace=@ui-assembler-slice/mcp-tool"
+  }
+}

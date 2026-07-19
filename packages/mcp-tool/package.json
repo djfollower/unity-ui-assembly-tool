@@ -1,0 +1,25 @@
+{
+  "name": "@ui-assembler-slice/mcp-tool",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Figma adapter + render-aware matcher for the vertical slice. No MCP server wrapper yet (T1.8-T2.8).",
+  "bin": {
+    "ui-assembler": "src/cli.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck",
+    "cli": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@ui-assembler-slice/contracts": "*",
+    "sharp": "^0.35.3",
+    "ssim.js": "^3.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ui-assembler-slice/contracts/element-tree.schema.json",
+  "title": "ElementTree",
+  "description": "Reduced, normalized Figma frame produced by the MCP tool's parse + reduce + normalize steps.",
+  "type": "object",
+  "required": ["source", "frame_id", "source_frame", "canvas_reference", "canvas_match_mode", "canvas_match_value", "elements"],
+  "additionalProperties": false,
+  "properties": {
+    "source": {
+      "type": "string",
+      "const": "figma"
+    },
+    "frame_id": {
+      "type": "string",
+      "description": "Figma frame node id."
+    },
+    "source_frame": {
+      "$ref": "#/definitions/size",
+      "description": "Pixel dimensions of the source Figma frame."
+    },
+    "canvas_reference": {
+      "$ref": "#/definitions/size",
+      "description": "Reference resolution the frame is normalized into (R3)."
+    },
+    "canvas_match_mode": {
+      "type": "string",
+      "enum": ["match_width_or_height", "expand", "shrink"],
+      "description": "Mirrors the project's CanvasScaler screen match mode."
+    },
+    "canvas_match_value": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "CanvasScaler match slider value, used by normalize.ts (R3)."
+    },
+    "elements": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/element" }
+    }
+  },
+  "definitions": {
+    "size": {
+      "type": "object",
+      "required": ["w", "h"],
+      "additionalProperties": false,
+      "properties": {
+        "w": { "type": "number", "exclusiveMinimum": 0 },
+        "h": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "rect": {
+      "type": "object",
+      "required": ["x", "y", "w", "h"],
+      "additionalProperties": false,
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "w": { "type": "number", "minimum": 0 },
+        "h": { "type": "number", "minimum": 0 }
+      }
+    },
+    "element": {
+      "type": "object",
+      "required": ["id", "figma_node_id", "type", "rect", "visual_description", "is_component_instance", "children"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Derived from the Figma layer name."
+        },
+        "figma_node_id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "description": "Logical element type assigned by the reduction pass, e.g. button, label, image, panel."
+        },
+        "rect": {
+          "$ref": "#/definitions/rect",
+          "description": "Position/size in canvas_reference space, post-normalization (R3)."
+        },
+        "visual_description": {
+          "type": "string"
+        },
+        "text_content": {
+          "type": "string",
+          "description": "Present only if a child text node exists."
+        },
+        "is_component_instance": {
+          "type": "boolean",
+          "description": "Figma signal used as a template hint (R9)."
+        },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/element" }
+        },
+        "composite": {
+          "type": "boolean",
+          "description": "True when this element's children are several layers that combine into one visual (e.g. a frame + backing + glyph stacked to form one button), to be scored jointly by the matcher rather than independently. Explicit, not inferred from geometry - composite layers are not guaranteed to share an identical rect. Absent/false means an ordinary layout grouping."
+        },
+        "container": {
+          "type": "boolean",
+          "description": "True when this element's children should be built as real nested GameObjects under a real parent transform (e.g. for post-assembly animation), rather than flattened to siblings under the canvas root. Explicit, author-set - absent/false means flatten (today's existing behavior). Independent of `composite` - a group can be composite, container, both, or neither."
+        }
+      }
+    }
+  }
+}

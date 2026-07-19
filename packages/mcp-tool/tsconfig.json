@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "outDir": "dist",
+    "skipLibCheck": true,
+    "paths": {
+      "@ui-assembler-slice/contracts": ["../contracts/src/types.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}

@@ -1,0 +1,753 @@
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12px;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    color: #222;
+  }
+  #status {
+    padding: 10px 12px;
+    line-height: 1.5;
+    color: #333;
+    word-break: break-word;
+    border-bottom: 1px solid #e5e5e5;
+    flex: none;
+  }
+  #status .frame-name { font-weight: 600; }
+  #status .hint { color: #888; font-size: 11px; }
+
+  #toolbar {
+    display: flex;
+    gap: 8px;
+    padding: 8px 12px;
+    border-bottom: 1px solid #e5e5e5;
+    flex: none;
+  }
+  button {
+    padding: 6px 10px;
+    cursor: pointer;
+    border: 1px solid #d0d0d0;
+    border-radius: 4px;
+    background: #fff;
+    font-size: 12px;
+  }
+  button:hover { background: #f5f5f5; }
+  button.primary { background: #18a0fb; border-color: #18a0fb; color: #fff; }
+  button.primary:hover { background: #0d8fe0; }
+  button.danger { background: #fff; border-color: #e04444; color: #e04444; }
+  button:disabled { opacity: 0.5; cursor: default; }
+
+  #combine-bar {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #eef7ff;
+    border-bottom: 1px solid #cfe8ff;
+    flex: none;
+  }
+  #combine-bar.active { display: flex; }
+  #combine-bar .count { font-weight: 600; }
+
+  #tree {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    white-space: nowrap;
+  }
+  .row.dimmed { opacity: 0.5; }
+  .row.combine-target { cursor: pointer; }
+  .row.combine-target:hover { background: #f0f7ff; }
+  .row.pending-combine { background: #eef7ff; }
+
+  .toggle {
+    width: 14px;
+    flex: none;
+    text-align: center;
+    cursor: pointer;
+    color: #888;
+    user-select: none;
+  }
+  .toggle.leaf { visibility: hidden; }
+
+  .thumb {
+    width: 22px;
+    height: 22px;
+    flex: none;
+    border: 1px solid #e0e0e0;
+    border-radius: 3px;
+    background: #f7f7f7;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    font-size: 9px;
+    color: #bbb;
+  }
+  .thumb img { width: 100%; height: 100%; object-fit: contain; }
+
+  .name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 160px;
+  }
+  .type-badge {
+    color: #999;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    flex: none;
+  }
+  .composite-badge {
+    flex: none;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: #fff1e0;
+    color: #b5560f;
+    cursor: pointer;
+    border: 1px solid #f0d5b0;
+  }
+  .composite-badge.pending-uncombine { background: #ffe0e0; color: #c0392b; border-color: #f0b0b0; }
+  .added-badge {
+    flex: none;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: #18a0fb;
+    color: #fff;
+  }
+  .type-select { flex: none; font-size: 11px; padding: 1px 2px; }
+  .text-label { flex: none; font-size: 10px; color: #888; font-style: italic; }
+</style>
+
+<div id="status">Select one frame in Figma, then re-run this plugin.</div>
+<div id="toolbar">
+  <button id="combine-toggle" disabled>Combine</button>
+  <button id="download" class="primary" disabled>Download JSON</button>
+</div>
+<div id="combine-bar">
+  <span><span class="count" id="combine-count">0</span> selected</span>
+  <button id="combine-confirm" class="primary" disabled>Confirm combine</button>
+  <button id="combine-cancel">Cancel</button>
+</div>
+<div id="tree"></div>
+
+<script>
+  const TYPE_TAGS = ["button", "icon", "panel", "image", "other"];
+
+  let tree = null;
+  let nodeIndex = new Map(); // id -> node object (as received/augmented)
+  let fileKey = null, rootNodeId = null, rootNodeName = null;
+
+  let checked = new Set();
+  let typeTags = new Map(); // id -> tag string, only for checked non-text nodes
+  let expanded = new Set(); // ids whose children are currently shown
+  let thumbnails = new Map(); // id -> dataUri | "loading" | "error"
+  let combinedExports = new Map(); // groupId -> dataUri | "error", see captureCombinedHiRes (code.js)
+
+  let combineMode = false;
+  let pendingCombine = new Set();
+  let pendingUncombineGroupId = null;
+
+  function post(message) {
+    parent.postMessage({ pluginMessage: message }, "*");
+  }
+
+  function indexTree(node) {
+    nodeIndex.set(node.id, node);
+    (node.children || []).forEach(indexTree);
+  }
+
+  // Flat list of currently-visible rows: top-level nodes are always shown,
+  // a node's children are shown only once its own id is in `expanded` -
+  // keeps the DOM bounded to what the user has actually opened, not all
+  // 901 nodes a real frame can contain.
+  function visibleRows() {
+    const rows = [];
+    function walk(node, depth) {
+      rows.push({ node, depth });
+      if (expanded.has(node.id)) {
+        (node.children || []).forEach((child) => walk(child, depth + 1));
+      }
+    }
+    (tree.children || []).forEach((child) => walk(child, 0));
+    return rows;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  function renderThumb(node) {
+    const state = thumbnails.get(node.id);
+    if (state === "loading") return `<div class="thumb">…</div>`;
+    if (state === "error" || !state) return `<div class="thumb"></div>`;
+    return `<div class="thumb"><img src="${state}" alt=""></div>`;
+  }
+
+  function renderRow({ node, depth }) {
+    const hasChildren = (node.children || []).length > 0;
+    const isText = node.type === "TEXT";
+    const isChecked = checked.has(node.id);
+    const isDimmed = node.visible === false;
+    const inPending = pendingCombine.has(node.id);
+
+    const rowClasses = ["row"];
+    if (isDimmed) rowClasses.push("dimmed");
+    if (combineMode) rowClasses.push("combine-target");
+    if (inPending) rowClasses.push("pending-combine");
+
+    const toggle = hasChildren
+      ? `<span class="toggle" data-action="toggle-expand" data-node-id="${node.id}">${expanded.has(node.id) ? "▾" : "▸"}</span>`
+      : `<span class="toggle leaf">▸</span>`;
+
+    const checkbox = `<input type="checkbox" data-action="toggle-check" data-node-id="${node.id}" ${isChecked ? "checked" : ""} ${combineMode ? "disabled" : ""}>`;
+
+    let tagControl = "";
+    if (isChecked && isText) {
+      tagControl = `<span class="text-label">text</span>`;
+    } else if (isChecked) {
+      const current = typeTags.get(node.id) || "other";
+      tagControl = `<select class="type-select" data-action="set-tag" data-node-id="${node.id}">` +
+        TYPE_TAGS.map((t) => `<option value="${t}" ${t === current ? "selected" : ""}>${t}</option>`).join("") +
+        `</select>`;
+    }
+
+    let compositeControl = "";
+    if (node.compositeGroupId) {
+      const pending = pendingUncombineGroupId === node.compositeGroupId;
+      compositeControl = `<span class="composite-badge ${pending ? "pending-uncombine" : ""}" data-action="${pending ? "confirm-uncombine" : "ask-uncombine"}" data-group-id="${node.compositeGroupId}">${pending ? "uncombine?" : "combined"}</span>`;
+    }
+
+    const addedBadge = combineMode && inPending ? `<span class="added-badge">added</span>` : "";
+
+    return `<div class="${rowClasses.join(" ")}" style="padding-left:${8 + depth * 16}px" data-action="${combineMode ? "combine-pick" : ""}" data-node-id="${node.id}">
+      ${toggle}
+      ${checkbox}
+      ${renderThumb(node)}
+      <span class="name" title="${escapeHtml(node.name)}">${escapeHtml(node.name)}</span>
+      <span class="type-badge">${escapeHtml(node.type)}</span>
+      ${compositeControl}
+      ${addedBadge}
+      ${tagControl}
+    </div>`;
+  }
+
+  function render() {
+    if (!tree) return;
+
+    document.getElementById("status").innerHTML =
+      `<div class="frame-name">${escapeHtml(rootNodeName)}</div>` +
+      `<div class="hint">Check the nodes to assemble, tag their type, Combine layered composites, then Download.</div>`;
+
+    const rows = visibleRows();
+    document.getElementById("tree").innerHTML = rows.map(renderRow).join("");
+
+    const combineToggle = document.getElementById("combine-toggle");
+    combineToggle.textContent = combineMode ? "Cancel combine" : "Combine";
+    combineToggle.disabled = false;
+
+    const combineBar = document.getElementById("combine-bar");
+    combineBar.classList.toggle("active", combineMode);
+    document.getElementById("combine-count").textContent = String(pendingCombine.size);
+    document.getElementById("combine-confirm").disabled = pendingCombine.size < 2;
+
+    document.getElementById("download").disabled = checked.size === 0;
+
+    requestMissingThumbnails(rows);
+  }
+
+  function requestMissingThumbnails(rows) {
+    const needed = rows
+      .map((r) => r.node.id)
+      .filter((id) => !thumbnails.has(id));
+    if (needed.length === 0) return;
+    needed.forEach((id) => thumbnails.set(id, "loading"));
+    post({ type: "requestThumbnails", nodeIds: needed });
+  }
+
+  // Rows are plain strings re-rendered on structural changes; thumbnails
+  // arrive independently (success or failure) and shouldn't force a full
+  // tree re-render while many are still streaming in, so patch just the
+  // specific row's thumb slot directly if it's currently in the DOM.
+  function patchThumbSlot(nodeId) {
+    const row = document.querySelector(`.row[data-node-id="${nodeId}"]`);
+    if (row) {
+      const thumb = row.querySelector(".thumb");
+      if (thumb) thumb.outerHTML = renderThumb({ id: nodeId });
+    }
+  }
+
+  // ---- element-tree export ----
+  // Ports packages/mcp-tool/src/figma/parse-tree.ts + normalize.ts +
+  // reduce-from-selection.ts directly into the plugin, so Download produces
+  // a schema-valid element-tree.json (+ sidecars) here instead of a raw
+  // export a Node CLI step used to reduce afterward. Kept as faithful,
+  // line-for-line ports of those files' logic - see them for the original
+  // comments explaining WHY each piece works the way it does; this file only
+  // notes where the plugin's own live state (checked/typeTags/
+  // combinedExports) stands in for what the Node side used to read off a
+  // FigmaNode/IntermediateNode.
+
+  // Mirrors normalize.ts's CanvasScalerConfig - hardcoded to match the real
+  // Melon project's CanvasScaler setting, same as cli.ts's own
+  // CANVAS_SCALER_CONFIG (carried over, not a new hardcode).
+  const CANVAS_SCALER_CONFIG = {
+    referenceResolution: { w: 1206, h: 2622 },
+    matchMode: "match_width_or_height",
+    matchValue: 1,
+  };
+
+  // normalize.ts::computeScaleFactor, verbatim.
+  function computeScaleFactor(sourceFrame, canvasScaler) {
+    if (canvasScaler.matchMode !== "match_width_or_height") {
+      throw new Error(`computeScaleFactor: canvas_match_mode "${canvasScaler.matchMode}" is not implemented`);
+    }
+    const logWidth = Math.log2(sourceFrame.w / canvasScaler.referenceResolution.w);
+    const logHeight = Math.log2(sourceFrame.h / canvasScaler.referenceResolution.h);
+    const logWeightedAverage = logWidth + (logHeight - logWidth) * canvasScaler.matchValue;
+    return Math.pow(2, logWeightedAverage);
+  }
+
+  // parse-tree.ts::parseTree/mapNode - raw plugin tree -> IntermediateNode.
+  // `origin` is the root frame's own absoluteBoundingBox (frame-relative
+  // rects, same convention golden-elements.json uses).
+  function buildIntermediateNode(node, origin) {
+    const box = node.absoluteBoundingBox;
+    const effects = (node.effects || []).filter((e) => e.visible !== false);
+    const thumb = thumbnails.get(node.id);
+    const capture = node.compositeGroupId ? combinedExports.get(node.compositeGroupId) : undefined;
+    return {
+      id: node.id,
+      name: node.name,
+      figmaType: node.type,
+      visible: node.visible !== false,
+      rect: box
+        ? { x: box.x - origin.x, y: box.y - origin.y, w: box.width, h: box.height }
+        : { x: 0, y: 0, w: 0, h: 0 },
+      isComponentInstance: node.type === "INSTANCE",
+      textContent: node.type === "TEXT" ? node.characters : undefined,
+      hasEffects: effects.length > 0,
+      effectTypes: effects.map((e) => e.type),
+      selected: checked.has(node.id),
+      typeTag: checked.has(node.id) && node.type !== "TEXT" ? (typeTags.get(node.id) || "other") : undefined,
+      compositeGroupId: node.compositeGroupId,
+      thumbnail: typeof thumb === "string" && thumb.startsWith("data:") ? thumb : undefined,
+      combinedHiResExport: typeof capture === "string" && capture.startsWith("data:") ? capture : undefined,
+      children: (node.children || []).map((child) => buildIntermediateNode(child, origin)),
+    };
+  }
+
+  // cli.ts::collectThumbnails, verbatim - walked independently of
+  // reduceFromSelection (below) since the review window needs every
+  // preview-carrying node keyed by its own figma_node_id, not just the ones
+  // that end up as emission points.
+  function collectThumbnails(node, into) {
+    if (node.visible === false) return;
+    if (node.thumbnail) into[node.id] = node.thumbnail;
+    for (const child of node.children) collectThumbnails(child, into);
+  }
+
+  // ---- reduce-from-selection.ts port ----
+
+  function collectGroups(root) {
+    const groups = new Map();
+    function walk(node, ancestorIds) {
+      if (node.visible === false) return;
+      if (node.compositeGroupId) {
+        const members = groups.get(node.compositeGroupId) || [];
+        members.push({ node, ancestorIds });
+        groups.set(node.compositeGroupId, members);
+      }
+      const childAncestorIds = new Set(ancestorIds);
+      childAncestorIds.add(node.id);
+      for (const child of node.children) walk(child, childAncestorIds);
+    }
+    for (const child of root.children) walk(child, new Set());
+    return groups;
+  }
+
+  function partitionGroup(members) {
+    let anchor = null;
+    const leaves = [];
+    for (const member of members) {
+      const isAncestorOfAnother = members.some((other) => other !== member && other.ancestorIds.has(member.node.id));
+      if (isAncestorOfAnother) anchor = member.node;
+      else leaves.push(member.node);
+    }
+    return { anchor, leaves };
+  }
+
+  function unionRect(rects) {
+    const minX = Math.min(...rects.map((r) => r.x));
+    const minY = Math.min(...rects.map((r) => r.y));
+    const maxX = Math.max(...rects.map((r) => r.x + r.w));
+    const maxY = Math.max(...rects.map((r) => r.y + r.h));
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  }
+
+  function elementType(node) {
+    if (node.figmaType === "TEXT") return "text";
+    return node.typeTag || "other";
+  }
+
+  function describeElement(node) {
+    return `${elementType(node)} - ${node.name}`;
+  }
+
+  function pluckFallbackCapture(anchor, leaves) {
+    if (anchor && anchor.combinedHiResExport) return anchor.combinedHiResExport;
+    const leaf = leaves.find((l) => l.combinedHiResExport);
+    return leaf ? leaf.combinedHiResExport : undefined;
+  }
+
+  function reduceFromSelection(root) {
+    const fallbackCaptures = {};
+    const groups = collectGroups(root);
+    const partitions = new Map();
+    const emissionPointId = new Map();
+    const consumedIds = new Set();
+
+    for (const [groupId, members] of groups) {
+      const partition = partitionGroup(members);
+      partitions.set(groupId, partition);
+      for (const member of members) consumedIds.add(member.node.id);
+      emissionPointId.set((partition.anchor || partition.leaves[0]).id, groupId);
+    }
+
+    const usedIds = new Set();
+    function uniqueId(name, disambiguator) {
+      const base = (name || "").trim() || disambiguator;
+      if (!usedIds.has(base)) {
+        usedIds.add(base);
+        return base;
+      }
+      const disambiguated = `${base}__${disambiguator.replace(/[:;]/g, "-")}`;
+      usedIds.add(disambiguated);
+      return disambiguated;
+    }
+
+    function buildLeaf(node) {
+      return {
+        id: uniqueId(node.name, node.id),
+        figma_node_id: node.id,
+        type: elementType(node),
+        rect: node.rect,
+        visual_description: describeElement(node),
+        text_content: node.figmaType === "TEXT" ? node.textContent : undefined,
+        is_component_instance: node.isComponentInstance,
+        children: [],
+      };
+    }
+
+    function buildCompositeElement(groupId) {
+      const partition = partitions.get(groupId);
+      if (!partition) throw new Error(`reduceFromSelection: unknown group "${groupId}"`);
+      const { anchor, leaves } = partition;
+      const leafElements = leaves.map(buildLeaf);
+
+      if (!anchor) {
+        const figmaNodeId = `combine:${groupId}`;
+        const capture = pluckFallbackCapture(anchor, leaves);
+        if (capture) fallbackCaptures[figmaNodeId] = capture;
+        return {
+          id: uniqueId(`combined_${groupId}`, groupId),
+          figma_node_id: figmaNodeId,
+          type: "other",
+          rect: unionRect(leaves.map((l) => l.rect)),
+          visual_description: `combined layers (${leaves.length})`,
+          is_component_instance: false,
+          composite: true,
+          children: leafElements,
+        };
+      }
+
+      const extraChildren = processChildren(anchor.children.filter((c) => !consumedIds.has(c.id)));
+
+      if (extraChildren.length === 0) {
+        const capture = pluckFallbackCapture(anchor, leaves);
+        if (capture) fallbackCaptures[anchor.id] = capture;
+        return {
+          id: uniqueId(anchor.name, anchor.id),
+          figma_node_id: anchor.id,
+          type: elementType(anchor),
+          rect: anchor.rect,
+          visual_description: describeElement(anchor),
+          is_component_instance: anchor.isComponentInstance,
+          composite: true,
+          children: leafElements,
+        };
+      }
+
+      const combinedFigmaNodeId = `combine:${groupId}`;
+      const combinedCapture = pluckFallbackCapture(anchor, leaves);
+      if (combinedCapture) fallbackCaptures[combinedFigmaNodeId] = combinedCapture;
+      const combinedSubElement = {
+        id: uniqueId(`${anchor.name}_combined`, groupId),
+        figma_node_id: combinedFigmaNodeId,
+        type: elementType(anchor),
+        rect: unionRect(leaves.map((l) => l.rect)),
+        visual_description: describeElement(anchor),
+        is_component_instance: anchor.isComponentInstance,
+        composite: true,
+        children: leafElements,
+      };
+
+      return {
+        id: uniqueId(anchor.name, anchor.id),
+        figma_node_id: anchor.id,
+        type: elementType(anchor),
+        rect: anchor.rect,
+        visual_description: describeElement(anchor),
+        is_component_instance: anchor.isComponentInstance,
+        container: true,
+        children: [combinedSubElement, ...extraChildren],
+      };
+    }
+
+    function processChildren(children) {
+      const result = [];
+      for (const child of children) {
+        if (child.visible === false) continue;
+
+        const groupId = emissionPointId.get(child.id);
+        if (groupId) {
+          result.push(buildCompositeElement(groupId));
+          continue;
+        }
+        if (consumedIds.has(child.id)) continue;
+
+        if (child.selected) {
+          const childElements = processChildren(child.children);
+          const el = {
+            id: uniqueId(child.name, child.id),
+            figma_node_id: child.id,
+            type: elementType(child),
+            rect: child.rect,
+            visual_description: describeElement(child),
+            text_content: child.figmaType === "TEXT" ? child.textContent : undefined,
+            is_component_instance: child.isComponentInstance,
+            children: childElements,
+          };
+          if (childElements.length > 0) el.container = true;
+          result.push(el);
+          continue;
+        }
+
+        result.push(...processChildren(child.children));
+      }
+      return result;
+    }
+
+    return { elements: processChildren(root.children), fallbackCaptures };
+  }
+
+  // ---- normalize.ts port ----
+
+  function scaleElement(el, scale) {
+    return {
+      ...el,
+      rect: { x: el.rect.x / scale, y: el.rect.y / scale, w: el.rect.w / scale, h: el.rect.h / scale },
+      children: el.children.map((child) => scaleElement(child, scale)),
+    };
+  }
+
+  function normalizeElementTree(reducedElements, frame, canvasScaler) {
+    const scale = computeScaleFactor(frame.sourceFrame, canvasScaler);
+    return {
+      source: "figma",
+      frame_id: frame.frameId,
+      source_frame: frame.sourceFrame,
+      canvas_reference: canvasScaler.referenceResolution,
+      canvas_match_mode: canvasScaler.matchMode,
+      canvas_match_value: canvasScaler.matchValue,
+      elements: reducedElements.map((el) => scaleElement(el, scale)),
+    };
+  }
+
+  // ---- wiring: raw tree -> {element_tree, element_thumbnails,
+  // element_fallback_captures} bundle, in one pass ----
+
+  function buildExportBundle() {
+    const bbox = tree.absoluteBoundingBox;
+    if (!bbox) throw new Error("buildExportBundle: root node has no absoluteBoundingBox");
+    const origin = { x: bbox.x, y: bbox.y };
+
+    const intermediateRoot = buildIntermediateNode(tree, origin);
+    const { elements: reducedElements, fallbackCaptures } = reduceFromSelection(intermediateRoot);
+    const elementTree = normalizeElementTree(
+      reducedElements,
+      { frameId: rootNodeId, sourceFrame: { w: bbox.width, h: bbox.height } },
+      CANVAS_SCALER_CONFIG,
+    );
+
+    const elementThumbnails = {};
+    collectThumbnails(intermediateRoot, elementThumbnails);
+
+    return {
+      element_tree: elementTree,
+      element_thumbnails: elementThumbnails,
+      element_fallback_captures: fallbackCaptures,
+    };
+  }
+
+  // Single bundled file, not three separate downloads - avoids the
+  // multi-download prompt/blocking behavior some browsers/webviews apply to
+  // a script triggering several downloads from one click. ReviewWindow reads
+  // this bundle directly (see Editor/Review/ReviewWindow.cs).
+  function downloadExport() {
+    const bundle = buildExportBundle();
+    const json = JSON.stringify(bundle, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${fileKey}__${rootNodeId.replace(":", "-")}.export.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  // ---- event delegation ----
+
+  document.getElementById("tree").addEventListener("click", (event) => {
+    const toggleEl = event.target.closest('[data-action="toggle-expand"]');
+    if (toggleEl) {
+      const id = toggleEl.dataset.nodeId;
+      if (expanded.has(id)) expanded.delete(id); else expanded.add(id);
+      render();
+      return;
+    }
+
+    const uncombineAsk = event.target.closest('[data-action="ask-uncombine"]');
+    if (uncombineAsk) {
+      pendingUncombineGroupId = uncombineAsk.dataset.groupId;
+      render();
+      return;
+    }
+    const uncombineConfirm = event.target.closest('[data-action="confirm-uncombine"]');
+    if (uncombineConfirm) {
+      const groupId = uncombineConfirm.dataset.groupId;
+      const memberIds = [...nodeIndex.values()].filter((n) => n.compositeGroupId === groupId).map((n) => n.id);
+      post({ type: "uncombine", groupId, nodeIds: memberIds });
+      pendingUncombineGroupId = null;
+      return;
+    }
+
+    const pickRow = event.target.closest('[data-action="combine-pick"]');
+    if (pickRow && combineMode) {
+      const id = pickRow.dataset.nodeId;
+      if (pendingCombine.has(id)) pendingCombine.delete(id); else pendingCombine.add(id);
+      render();
+    }
+  });
+
+  document.getElementById("tree").addEventListener("change", (event) => {
+    const checkboxEl = event.target.closest('[data-action="toggle-check"]');
+    if (checkboxEl) {
+      const id = checkboxEl.dataset.nodeId;
+      if (checkboxEl.checked) checked.add(id); else checked.delete(id);
+      render();
+      return;
+    }
+    const tagEl = event.target.closest('[data-action="set-tag"]');
+    if (tagEl) {
+      typeTags.set(tagEl.dataset.nodeId, tagEl.value);
+    }
+  });
+
+  document.getElementById("combine-toggle").addEventListener("click", () => {
+    combineMode = !combineMode;
+    pendingCombine.clear();
+    render();
+  });
+  document.getElementById("combine-cancel").addEventListener("click", () => {
+    combineMode = false;
+    pendingCombine.clear();
+    render();
+  });
+  document.getElementById("combine-confirm").addEventListener("click", () => {
+    post({ type: "confirmCombine", nodeIds: [...pendingCombine] });
+  });
+  document.getElementById("download").addEventListener("click", downloadExport);
+
+  window.onmessage = (event) => {
+    const msg = event.data.pluginMessage;
+    if (!msg) return;
+
+    if (msg.type === "error") {
+      document.getElementById("status").textContent = msg.message;
+      return;
+    }
+
+    if (msg.type === "init") {
+      tree = msg.tree;
+      fileKey = msg.fileKey;
+      rootNodeId = msg.nodeId;
+      rootNodeName = msg.nodeName;
+      nodeIndex = new Map();
+      indexTree(tree);
+      render();
+      return;
+    }
+
+    if (msg.type === "thumbnail") {
+      thumbnails.set(msg.nodeId, msg.dataUri);
+      patchThumbSlot(msg.nodeId);
+      return;
+    }
+    if (msg.type === "thumbnailError") {
+      thumbnails.set(msg.nodeId, "error");
+      patchThumbSlot(msg.nodeId);
+      return;
+    }
+
+    if (msg.type === "combineConfirmed") {
+      msg.nodeIds.forEach((id) => {
+        const node = nodeIndex.get(id);
+        if (node) node.compositeGroupId = msg.groupId;
+      });
+      combineMode = false;
+      pendingCombine.clear();
+      render();
+      return;
+    }
+    if (msg.type === "uncombineConfirmed") {
+      msg.nodeIds.forEach((id) => {
+        const node = nodeIndex.get(id);
+        if (node) delete node.compositeGroupId;
+      });
+      render();
+      return;
+    }
+
+    // No dedicated UI indicator for these (unlike thumbnail/thumbnailError,
+    // which patch a visible slot) - just recorded for buildExportNode to
+    // pick up whenever the user clicks Download. A failed/no-anchor capture
+    // (see code.js's captureCombinedHiRes) means that group's export simply
+    // has no combinedHiResExport field, same as if Combine were never used
+    // for hi-res purposes at all - not a fatal error for the whole export.
+    if (msg.type === "combinedExport") {
+      combinedExports.set(msg.groupId, msg.dataUri);
+      return;
+    }
+    if (msg.type === "combinedExportError") {
+      combinedExports.set(msg.groupId, "error");
+      console.warn(`combinedExport failed for group ${msg.groupId}: ${msg.message}`);
+      return;
+    }
+  };
+</script>
