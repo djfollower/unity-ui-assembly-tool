@@ -44,6 +44,18 @@ namespace UiAssemblerSlice.Editor.Review
         // top-level keys) - not a raw, pre-reduction plugin export anymore.
         private string _exportBundlePath = "";
         private string _catalogPath = ".cache/catalog.json";
+        // Where to read/write element-tree.json / match-result.json /
+        // element-thumbnails.json / element-fallback-captures.json. Blank
+        // (the default) falls back to RepoRoot's own guess below, for
+        // backward compatibility with the "monorepo cloned as a sibling
+        // folder next to the Unity project" convention - but that guess
+        // breaks whenever this package is installed via a git-URL UPM
+        // dependency instead of a local sibling checkout (it resolves into
+        // Library/PackageCache's hashed folder, not a sibling
+        // "unity-ui-assembly-tool" directory), and is fragile in general
+        // across drive letters/OSes. Set this explicitly instead of relying
+        // on the guess if RunMatcher/LoadReviewData can't find their files.
+        private string _cacheFolderPath = "";
 
         // ---- pipeline ----
         private string _statusMessage = "";
@@ -67,14 +79,19 @@ namespace UiAssemblerSlice.Editor.Review
         private static string RepoRoot =>
             Path.GetFullPath(Path.Combine(Application.dataPath, "..", "..", "unity-ui-assembly-tool"));
 
-        // Fixed .cache/-relative outputs, not user-entered - matches
-        // cli.ts's own defaults exactly, so pointing the pipeline steps at
-        // these explicit output paths and reading them back afterward is
-        // guaranteed consistent.
-        private string ElementTreePath => Path.Combine(RepoRoot, ".cache", "element-tree.json");
-        private string MatchResultPath => Path.Combine(RepoRoot, ".cache", "match-result.json");
-        private string ElementThumbnailsPath => Path.Combine(RepoRoot, ".cache", "element-thumbnails.json");
-        private string ElementFallbackCapturesPath => Path.Combine(RepoRoot, ".cache", "element-fallback-captures.json");
+        // Resolves to _cacheFolderPath when set (absolute, or relative to
+        // RepoRoot), else falls back to RepoRoot's own guessed .cache/ -
+        // see _cacheFolderPath's own comment on why that guess isn't always
+        // reliable.
+        private string CacheFolder =>
+            string.IsNullOrWhiteSpace(_cacheFolderPath)
+                ? Path.Combine(RepoRoot, ".cache")
+                : ResolvePath(_cacheFolderPath, RepoRoot);
+
+        private string ElementTreePath => Path.Combine(CacheFolder, "element-tree.json");
+        private string MatchResultPath => Path.Combine(CacheFolder, "match-result.json");
+        private string ElementThumbnailsPath => Path.Combine(CacheFolder, "element-thumbnails.json");
+        private string ElementFallbackCapturesPath => Path.Combine(CacheFolder, "element-fallback-captures.json");
 
         private static string ResolvePath(string userPath, string repoRoot)
         {
@@ -127,6 +144,17 @@ namespace UiAssemblerSlice.Editor.Review
             {
                 var picked = EditorUtility.OpenFilePanel("Select catalog.json", "", "json");
                 if (!string.IsNullOrEmpty(picked)) _catalogPath = picked;
+            }
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.BeginHorizontal();
+            _cacheFolderPath = EditorGUILayout.TextField(
+                new GUIContent("Cache folder", "Leave blank to use the sibling-repo-checkout guess. Set explicitly if this package was installed via a git URL, or if RunMatcher/Load can't find their files."),
+                _cacheFolderPath);
+            if (GUILayout.Button("Browse...", GUILayout.Width(70)))
+            {
+                var picked = EditorUtility.OpenFolderPanel("Select cache folder", "", "");
+                if (!string.IsNullOrEmpty(picked)) _cacheFolderPath = picked;
             }
             EditorGUILayout.EndHorizontal();
 
