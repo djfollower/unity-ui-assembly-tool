@@ -92,6 +92,181 @@ namespace UiAssemblerSlice.Editor.Catalog
             }
         }
 
+        // Editor/Matcher/VisualSignal.cs support: renders a candidate the way
+        // NodeBuilder will actually assemble it - stretched/9-sliced to fill
+        // an element's own target rect exactly, not fit-and-letterboxed into
+        // a square like RenderToPngBytes above. Operates on the live asset
+        // (AssetDatabase.LoadAssetAtPath), not the pre-baked thumbnail PNG -
+        // this is what lets the matcher reuse this class's real
+        // Graphics.DrawTexture border rendering instead of the pure-JS
+        // content-bbox-detection/9-slice-reconstruction the old Node-side
+        // render-candidate.ts needed (it could only ever see the flat,
+        // already-square thumbnail, never the live Unity asset).
+        public static Texture2D RenderAtExactSize(DiscoveredAsset asset, RenderMetadata metadata, int targetW, int targetH)
+        {
+            return asset.AssetType == "prefab"
+                ? RenderPrefabHierarchyAtSize(asset, metadata, targetW, targetH)
+                : RenderSpriteAtSize(asset, metadata, targetW, targetH);
+        }
+
+        private static Color ResolveTint(string tintHex)
+        {
+            if (!string.IsNullOrEmpty(tintHex) && ColorUtility.TryParseHtmlString(tintHex, out var parsed))
+            {
+                return parsed;
+            }
+            return Color.white;
+        }
+
+        private static Texture2D RenderSpriteAtSize(DiscoveredAsset asset, RenderMetadata metadata, int targetW, int targetH)
+        {
+            var texture = AssetDatabase.LoadAssetAtPath<Texture2D>(asset.Path);
+            if (texture == null)
+            {
+                throw new InvalidOperationException($"RenderedThumbnail: could not resolve a source texture for {asset.Path}");
+            }
+            var tint = ResolveTint(metadata.TintHex);
+
+            if (metadata.ImageType != "Sliced")
+            {
+                // Simple/Tiled/Filled: no border to protect (see the class
+                // doc comment's border-corruption warning, Sliced-only) -
+                // DrawTexture is a plain stretch either way, safe to
+                // composite straight at the exact final size.
+                return CompositeAtSize(texture, false, metadata.Border, tint, targetW, targetH);
+            }
+
+            // Sliced: never composite smaller than native on either axis
+            // (class doc comment) - composite at a safe size (>= native on
+            // both axes, independently) and let any further up/down scaling
+            // happen as a separate bilinear resample, same two-step
+            // RenderSprite (canonical-thumbnail path) already uses. Safe per
+            // axis rather than a single uniform scale factor since the
+            // matcher's target rect is not aspect-locked to the sprite's own
+            // native size the way a canonical-square thumbnail is.
+            var natW = Mathf.Max(1, Mathf.RoundToInt(metadata.NativeWidth));
+            var natH = Mathf.Max(1, Mathf.RoundToInt(metadata.NativeHeight));
+            var safeW = Mathf.Max(natW, targetW);
+            var safeH = Mathf.Max(natH, targetH);
+            var rendered = CompositeAtSize(texture, true, metadata.Border, tint, safeW, safeH);
+            if (safeW == targetW && safeH == targetH) return rendered;
+            try
+            {
+                return ResampleBilinear(rendered, targetW, targetH);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(rendered);
+            }
+        }
+
+        // Near-duplicate of RenderPrefabHierarchy below by design, not
+        // refactored into a shared core: that method renders at the
+        // prefab's own native size and letterboxes into a canonical square
+        // (thumbnail-bake path, already delicately tuned against several
+        // confirmed rendering bugs - see the class doc comment), whereas
+        // this renders directly at an arbitrary caller-supplied (w, h) with
+        // no final letterbox/resample step at all (matcher path). Keeping
+        // them separate avoids risking the already-proven thumbnail path
+        // for a change only the matcher needs.
+        private static Texture2D RenderPrefabHierarchyAtSize(DiscoveredAsset asset, RenderMetadata metadata, int targetW, int targetH)
+        {
+            var prefabSource = AssetDatabase.LoadAssetAtPath<GameObject>(asset.Path);
+            if (prefabSource == null)
+            {
+                throw new InvalidOperationException($"RenderedThumbnail: could not load prefab at {asset.Path}");
+            }
+
+            var instance = (GameObject)PrefabUtility.InstantiatePrefab(prefabSource);
+            var tempAssets = new List<UnityEngine.Object>();
+            GameObject canvasGo = null;
+            GameObject camGo = null;
+            RenderTexture rt = null;
+            var prevActive = RenderTexture.active;
+
+            try
+            {
+                canvasGo = new GameObject("ThumbnailCanvas", typeof(Canvas), typeof(CanvasScaler));
+                instance.transform.SetParent(canvasGo.transform, false);
+
+                var rootRt = instance.GetComponent<RectTransform>();
+                rootRt.anchorMin = new Vector2(0.5f, 0.5f);
+                rootRt.anchorMax = new Vector2(0.5f, 0.5f);
+                rootRt.pivot = new Vector2(0.5f, 0.5f);
+                rootRt.anchoredPosition = Vector2.zero;
+                rootRt.sizeDelta = new Vector2(targetW, targetH);
+                var nativeW = Mathf.Max(1, targetW);
+                var nativeH = Mathf.Max(1, targetH);
+
+                // Same Sliced-Image pre-composite swap RenderPrefabHierarchy
+                // uses (see its own comment) - reads each contributing
+                // Image's OWN rectTransform size, which reflects targetW/H
+                // once layout has propagated to it below.
+                foreach (var img in instance.GetComponentsInChildren<Image>(true))
+                {
+                    if (!img.gameObject.activeInHierarchy || !img.enabled || img.color.a <= 0.01f) continue;
+                    if (img.type != Image.Type.Sliced || img.sprite == null) continue;
+
+                    var spritePath = AssetDatabase.GetAssetPath(img.sprite);
+                    var texture = AssetDatabase.LoadAssetAtPath<Texture2D>(spritePath);
+                    var border = img.sprite.border;
+                    var tw = Mathf.Max(1, Mathf.RoundToInt(img.rectTransform.rect.width));
+                    var th = Mathf.Max(1, Mathf.RoundToInt(img.rectTransform.rect.height));
+                    var composited = CompositeAtSize(texture, true, new[] { border.x, border.y, border.z, border.w }, Color.white, tw, th);
+                    var sprite = Sprite.Create(composited, new Rect(0, 0, tw, th), new Vector2(0.5f, 0.5f));
+                    tempAssets.Add(sprite);
+                    tempAssets.Add(composited);
+                    img.sprite = sprite;
+                    img.type = Image.Type.Simple;
+                }
+
+                LayoutRebuilder.ForceRebuildLayoutImmediate(rootRt);
+
+                camGo = new GameObject("ThumbnailCam", typeof(Camera));
+                var cam = camGo.GetComponent<Camera>();
+                cam.orthographic = true;
+                cam.orthographicSize = nativeH / 2f;
+                cam.nearClipPlane = 0.1f;
+                cam.farClipPlane = 100f;
+                cam.clearFlags = CameraClearFlags.SolidColor;
+                cam.backgroundColor = new Color(0, 0, 0, 0);
+                cam.aspect = (float)nativeW / nativeH;
+
+                rt = RenderTexture.GetTemporary(nativeW, nativeH, 24, RenderTextureFormat.ARGB32);
+                cam.targetTexture = rt;
+
+                var canvas = canvasGo.GetComponent<Canvas>();
+                var scaler = canvasGo.GetComponent<CanvasScaler>();
+                scaler.uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
+                scaler.scaleFactor = 1;
+                canvas.renderMode = RenderMode.ScreenSpaceCamera;
+                canvas.worldCamera = cam;
+                canvas.planeDistance = 10;
+
+                Canvas.ForceUpdateCanvases();
+                cam.Render();
+
+                RenderTexture.active = rt;
+                var native = new Texture2D(nativeW, nativeH, TextureFormat.RGBA32, false);
+                native.ReadPixels(new Rect(0, 0, nativeW, nativeH), 0, 0);
+                native.Apply();
+                return native;
+            }
+            finally
+            {
+                RenderTexture.active = prevActive;
+                if (rt != null)
+                {
+                    var cam = camGo != null ? camGo.GetComponent<Camera>() : null;
+                    if (cam != null) cam.targetTexture = null;
+                    RenderTexture.ReleaseTemporary(rt);
+                }
+                if (camGo != null) UnityEngine.Object.DestroyImmediate(camGo);
+                if (canvasGo != null) UnityEngine.Object.DestroyImmediate(canvasGo);
+                foreach (var tempAsset in tempAssets) UnityEngine.Object.DestroyImmediate(tempAsset);
+            }
+        }
+
         // Returns a bitmap sized to fit within canonicalSize (native aspect
         // preserved, not yet centered/padded into the square canvas).
         private static Texture2D RenderSprite(DiscoveredAsset asset, RenderMetadata metadata, int canonicalSize)
@@ -294,7 +469,7 @@ namespace UiAssemblerSlice.Editor.Catalog
         // proven usage exactly (`Graphics.DrawTexture`'s border handling
         // was confirmed to misbehave when drawn into an inset destRect
         // within a larger canvas - see the class doc comment).
-        private static Texture2D CompositeAtSize(Texture2D texture, bool sliced, float[] border, Color tint, int w, int h)
+        internal static Texture2D CompositeAtSize(Texture2D texture, bool sliced, float[] border, Color tint, int w, int h)
         {
             RenderTexture rt = null;
             var prevActive = RenderTexture.active;
@@ -336,7 +511,7 @@ namespace UiAssemblerSlice.Editor.Catalog
 
         // Plain bilinear image resize - no border/9-slice logic, just
         // scaling an already-finished bitmap down (or up) uniformly.
-        private static Texture2D ResampleBilinear(Texture2D source, int targetW, int targetH)
+        internal static Texture2D ResampleBilinear(Texture2D source, int targetW, int targetH)
         {
             var prevFilter = source.filterMode;
             RenderTexture rt = null;

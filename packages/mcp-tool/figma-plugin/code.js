@@ -208,6 +208,26 @@ figma.ui.onmessage = async (msg) => {
   }
 };
 
+// Existing composite groups (compositeGroupId persisted via
+// setPluginData from a PRIOR plugin session, read back in serializeNode
+// above) don't carry their hi-res capture forward - combinedHiResExport
+// only ever lived in ui.html's in-memory combinedExports Map (see
+// handleConfirmCombine/captureCombinedHiRes), which is gone once the
+// plugin closes. Re-running captureCombinedHiRes for every pre-existing
+// group on load (not just freshly-confirmed ones) keeps re-opening the
+// plugin on an already-combined frame from silently losing the
+// visual-signal ground truth for those elements downstream - confirmed
+// as the cause of a real "no ground-truth image available" matcher
+// failure, not a theoretical gap.
+function collectExistingGroups(node, into) {
+  if (node.compositeGroupId) {
+    const members = into.get(node.compositeGroupId) || [];
+    members.push(node.id);
+    into.set(node.compositeGroupId, members);
+  }
+  (node.children || []).forEach((child) => collectExistingGroups(child, into));
+}
+
 const selection = figma.currentPage.selection;
 if (selection.length !== 1) {
   figma.ui.postMessage({
@@ -224,4 +244,10 @@ if (selection.length !== 1) {
     nodeId: node.id,
     nodeName: node.name,
   });
+
+  const existingGroups = new Map();
+  collectExistingGroups(tree, existingGroups);
+  for (const [groupId, nodeIds] of existingGroups) {
+    captureCombinedHiRes(groupId, nodeIds);
+  }
 }

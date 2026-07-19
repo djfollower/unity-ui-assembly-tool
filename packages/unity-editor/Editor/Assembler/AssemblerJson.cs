@@ -324,6 +324,11 @@ namespace UiAssemblerSlice.Editor.Assembler
         // before Container/Children.Count, since a composite element can
         // (and typically does) still carry children.
         public bool Composite;
+        // Matcher-only fields (Editor/Matcher/) - NodeBuilder never read
+        // these, hence absent until the matcher moved into C# (see
+        // element-tree.schema.json's visual_description/is_component_instance).
+        public string VisualDescription;
+        public bool IsComponentInstance;
         public List<ElementData> Children = new List<ElementData>();
     }
 
@@ -400,6 +405,16 @@ namespace UiAssemblerSlice.Editor.Assembler
         // before returning it, so nothing downstream needs to know where
         // catalog.json physically lives. Review-window preview only.
         public string ThumbnailPath;
+        // Matcher-only fields (Editor/Matcher/) - NodeBuilder never read
+        // these. Ppu/NativeSize feed RenderedThumbnail.RenderAtExactSize
+        // (candidate rendering) and Gate's resize-safety check;
+        // Role/VisualDescription/Feature feed Candidates/StructuralSignal's
+        // token scoring.
+        public float Ppu;
+        public Vector2Data NativeSize;
+        public string Role;
+        public string VisualDescription;
+        public string Feature;
     }
 
     public static class AssemblerJson
@@ -440,6 +455,8 @@ namespace UiAssemblerSlice.Editor.Assembler
                     TextContent = obj.TryGetValue("text_content", out var text) ? (string)text : null,
                     Container = obj.TryGetValue("container", out var containerVal) && containerVal is bool containerBool && containerBool,
                     Composite = obj.TryGetValue("composite", out var compositeVal) && compositeVal is bool compositeBool && compositeBool,
+                    VisualDescription = obj.TryGetValue("visual_description", out var desc) ? desc as string : null,
+                    IsComponentInstance = obj.TryGetValue("is_component_instance", out var isInst) && isInst is bool isInstBool && isInstBool,
                     Children = ParseElements((List<object>)obj["children"]),
                 });
             }
@@ -478,6 +495,7 @@ namespace UiAssemblerSlice.Editor.Assembler
             {
                 var obj = (Dictionary<string, object>)item;
                 var render = (Dictionary<string, object>)obj["render"];
+                var nativeSize = (Dictionary<string, object>)render["native_size"];
                 result.Add(new CatalogEntryData
                 {
                     Id = (string)obj["id"],
@@ -489,6 +507,13 @@ namespace UiAssemblerSlice.Editor.Assembler
                     TintHex = render.TryGetValue("tint", out var tint) ? tint as string : null,
                     // top-level sibling of "render", required
                     ThumbnailPath = Path.GetFullPath(Path.Combine(catalogDir, (string)obj["thumbnail_path"])),
+                    Ppu = (float)(double)render["ppu"],
+                    NativeSize = new Vector2Data(
+                        (float)(double)nativeSize["w"],
+                        (float)(double)nativeSize["h"]),
+                    Role = obj.TryGetValue("role", out var role) ? role as string : null,
+                    VisualDescription = obj.TryGetValue("visual_description", out var visDesc) ? visDesc as string : null,
+                    Feature = obj.TryGetValue("feature", out var feature) ? feature as string : null,
                 });
             }
             return result;

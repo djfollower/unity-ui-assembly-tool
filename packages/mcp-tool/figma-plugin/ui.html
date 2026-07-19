@@ -290,56 +290,331 @@
     }
   }
 
-  function buildExportNode(node) {
-    const out = {
-      id: node.id,
-      name: node.name,
-      type: node.type,
-      visible: node.visible,
-    };
-    if (node.absoluteBoundingBox) out.absoluteBoundingBox = node.absoluteBoundingBox;
-    if (node.type === "TEXT" && node.characters !== undefined) out.characters = node.characters;
-    if (node.effects) out.effects = node.effects;
+  // ---- element-tree export ----
+  // Ports packages/mcp-tool/src/figma/parse-tree.ts + normalize.ts +
+  // reduce-from-selection.ts directly into the plugin, so Download produces
+  // a schema-valid element-tree.json (+ sidecars) here instead of a raw
+  // export a Node CLI step used to reduce afterward. Kept as faithful,
+  // line-for-line ports of those files' logic - see them for the original
+  // comments explaining WHY each piece works the way it does; this file only
+  // notes where the plugin's own live state (checked/typeTags/
+  // combinedExports) stands in for what the Node side used to read off a
+  // FigmaNode/IntermediateNode.
 
-    out.selected = checked.has(node.id);
-    if (out.selected && node.type !== "TEXT") {
-      out.typeTag = typeTags.get(node.id) || "other";
+  // Mirrors normalize.ts's CanvasScalerConfig - hardcoded to match the real
+  // Melon project's CanvasScaler setting, same as cli.ts's own
+  // CANVAS_SCALER_CONFIG (carried over, not a new hardcode).
+  const CANVAS_SCALER_CONFIG = {
+    referenceResolution: { w: 1206, h: 2622 },
+    matchMode: "match_width_or_height",
+    matchValue: 1,
+  };
+
+  // normalize.ts::computeScaleFactor, verbatim.
+  function computeScaleFactor(sourceFrame, canvasScaler) {
+    if (canvasScaler.matchMode !== "match_width_or_height") {
+      throw new Error(`computeScaleFactor: canvas_match_mode "${canvasScaler.matchMode}" is not implemented`);
     }
-    if (node.compositeGroupId) out.compositeGroupId = node.compositeGroupId;
-
-    // Anything that will get its own match-result row downstream needs a
-    // preview image for Stage 3's review screen - not just checked nodes,
-    // but composite-group members too (their group gets one review row,
-    // but which member ends up as the emission point is decided Node-side
-    // in reduce-from-selection.ts, not knowable here). Omitted (not null)
-    // when no thumbnail resolved yet - a rare pre-resolution race, not
-    // worth blocking export over; the review screen already treats a
-    // missing preview as an acceptable gap.
-    if (out.selected || node.compositeGroupId) {
-      const thumb = thumbnails.get(node.id);
-      if (typeof thumb === "string" && thumb.startsWith("data:")) out.thumbnail = thumb;
-    }
-
-    // Attached redundantly to every member of the group (same approach as
-    // `thumbnail` above) - reduce-from-selection.ts's fallbackCaptures
-    // plucks it off whichever member ends up as the emission point, so no
-    // extra bookkeeping is needed here about which one that'll be.
-    if (node.compositeGroupId) {
-      const capture = combinedExports.get(node.compositeGroupId);
-      if (typeof capture === "string" && capture.startsWith("data:")) out.combinedHiResExport = capture;
-    }
-
-    if (node.children) out.children = node.children.map(buildExportNode);
-    return out;
+    const logWidth = Math.log2(sourceFrame.w / canvasScaler.referenceResolution.w);
+    const logHeight = Math.log2(sourceFrame.h / canvasScaler.referenceResolution.h);
+    const logWeightedAverage = logWidth + (logHeight - logWidth) * canvasScaler.matchValue;
+    return Math.pow(2, logWeightedAverage);
   }
 
+  // parse-tree.ts::parseTree/mapNode - raw plugin tree -> IntermediateNode.
+  // `origin` is the root frame's own absoluteBoundingBox (frame-relative
+  // rects, same convention golden-elements.json uses).
+  function buildIntermediateNode(node, origin) {
+    const box = node.absoluteBoundingBox;
+    const effects = (node.effects || []).filter((e) => e.visible !== false);
+    const thumb = thumbnails.get(node.id);
+    const capture = node.compositeGroupId ? combinedExports.get(node.compositeGroupId) : undefined;
+    return {
+      id: node.id,
+      name: node.name,
+      figmaType: node.type,
+      visible: node.visible !== false,
+      rect: box
+        ? { x: box.x - origin.x, y: box.y - origin.y, w: box.width, h: box.height }
+        : { x: 0, y: 0, w: 0, h: 0 },
+      isComponentInstance: node.type === "INSTANCE",
+      textContent: node.type === "TEXT" ? node.characters : undefined,
+      hasEffects: effects.length > 0,
+      effectTypes: effects.map((e) => e.type),
+      selected: checked.has(node.id),
+      typeTag: checked.has(node.id) && node.type !== "TEXT" ? (typeTags.get(node.id) || "other") : undefined,
+      compositeGroupId: node.compositeGroupId,
+      thumbnail: typeof thumb === "string" && thumb.startsWith("data:") ? thumb : undefined,
+      combinedHiResExport: typeof capture === "string" && capture.startsWith("data:") ? capture : undefined,
+      children: (node.children || []).map((child) => buildIntermediateNode(child, origin)),
+    };
+  }
+
+  // cli.ts::collectThumbnails, verbatim - walked independently of
+  // reduceFromSelection (below) since the review window needs every
+  // preview-carrying node keyed by its own figma_node_id, not just the ones
+  // that end up as emission points.
+  function collectThumbnails(node, into) {
+    if (node.visible === false) return;
+    if (node.thumbnail) into[node.id] = node.thumbnail;
+    for (const child of node.children) collectThumbnails(child, into);
+  }
+
+  // ---- reduce-from-selection.ts port ----
+
+  function collectGroups(root) {
+    const groups = new Map();
+    function walk(node, ancestorIds) {
+      if (node.visible === false) return;
+      if (node.compositeGroupId) {
+        const members = groups.get(node.compositeGroupId) || [];
+        members.push({ node, ancestorIds });
+        groups.set(node.compositeGroupId, members);
+      }
+      const childAncestorIds = new Set(ancestorIds);
+      childAncestorIds.add(node.id);
+      for (const child of node.children) walk(child, childAncestorIds);
+    }
+    for (const child of root.children) walk(child, new Set());
+    return groups;
+  }
+
+  function partitionGroup(members) {
+    let anchor = null;
+    const leaves = [];
+    for (const member of members) {
+      const isAncestorOfAnother = members.some((other) => other !== member && other.ancestorIds.has(member.node.id));
+      if (isAncestorOfAnother) anchor = member.node;
+      else leaves.push(member.node);
+    }
+    return { anchor, leaves };
+  }
+
+  function unionRect(rects) {
+    const minX = Math.min(...rects.map((r) => r.x));
+    const minY = Math.min(...rects.map((r) => r.y));
+    const maxX = Math.max(...rects.map((r) => r.x + r.w));
+    const maxY = Math.max(...rects.map((r) => r.y + r.h));
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  }
+
+  function elementType(node) {
+    if (node.figmaType === "TEXT") return "text";
+    return node.typeTag || "other";
+  }
+
+  function describeElement(node) {
+    return `${elementType(node)} - ${node.name}`;
+  }
+
+  function pluckFallbackCapture(anchor, leaves) {
+    if (anchor && anchor.combinedHiResExport) return anchor.combinedHiResExport;
+    const leaf = leaves.find((l) => l.combinedHiResExport);
+    return leaf ? leaf.combinedHiResExport : undefined;
+  }
+
+  function reduceFromSelection(root) {
+    const fallbackCaptures = {};
+    const groups = collectGroups(root);
+    const partitions = new Map();
+    const emissionPointId = new Map();
+    const consumedIds = new Set();
+
+    for (const [groupId, members] of groups) {
+      const partition = partitionGroup(members);
+      partitions.set(groupId, partition);
+      for (const member of members) consumedIds.add(member.node.id);
+      emissionPointId.set((partition.anchor || partition.leaves[0]).id, groupId);
+    }
+
+    const usedIds = new Set();
+    function uniqueId(name, disambiguator) {
+      const base = (name || "").trim() || disambiguator;
+      if (!usedIds.has(base)) {
+        usedIds.add(base);
+        return base;
+      }
+      const disambiguated = `${base}__${disambiguator.replace(/[:;]/g, "-")}`;
+      usedIds.add(disambiguated);
+      return disambiguated;
+    }
+
+    function buildLeaf(node) {
+      return {
+        id: uniqueId(node.name, node.id),
+        figma_node_id: node.id,
+        type: elementType(node),
+        rect: node.rect,
+        visual_description: describeElement(node),
+        text_content: node.figmaType === "TEXT" ? node.textContent : undefined,
+        is_component_instance: node.isComponentInstance,
+        children: [],
+      };
+    }
+
+    function buildCompositeElement(groupId) {
+      const partition = partitions.get(groupId);
+      if (!partition) throw new Error(`reduceFromSelection: unknown group "${groupId}"`);
+      const { anchor, leaves } = partition;
+      const leafElements = leaves.map(buildLeaf);
+
+      if (!anchor) {
+        const figmaNodeId = `combine:${groupId}`;
+        const capture = pluckFallbackCapture(anchor, leaves);
+        if (capture) fallbackCaptures[figmaNodeId] = capture;
+        return {
+          id: uniqueId(`combined_${groupId}`, groupId),
+          figma_node_id: figmaNodeId,
+          type: "other",
+          rect: unionRect(leaves.map((l) => l.rect)),
+          visual_description: `combined layers (${leaves.length})`,
+          is_component_instance: false,
+          composite: true,
+          children: leafElements,
+        };
+      }
+
+      const extraChildren = processChildren(anchor.children.filter((c) => !consumedIds.has(c.id)));
+
+      if (extraChildren.length === 0) {
+        const capture = pluckFallbackCapture(anchor, leaves);
+        if (capture) fallbackCaptures[anchor.id] = capture;
+        return {
+          id: uniqueId(anchor.name, anchor.id),
+          figma_node_id: anchor.id,
+          type: elementType(anchor),
+          rect: anchor.rect,
+          visual_description: describeElement(anchor),
+          is_component_instance: anchor.isComponentInstance,
+          composite: true,
+          children: leafElements,
+        };
+      }
+
+      const combinedFigmaNodeId = `combine:${groupId}`;
+      const combinedCapture = pluckFallbackCapture(anchor, leaves);
+      if (combinedCapture) fallbackCaptures[combinedFigmaNodeId] = combinedCapture;
+      const combinedSubElement = {
+        id: uniqueId(`${anchor.name}_combined`, groupId),
+        figma_node_id: combinedFigmaNodeId,
+        type: elementType(anchor),
+        rect: unionRect(leaves.map((l) => l.rect)),
+        visual_description: describeElement(anchor),
+        is_component_instance: anchor.isComponentInstance,
+        composite: true,
+        children: leafElements,
+      };
+
+      return {
+        id: uniqueId(anchor.name, anchor.id),
+        figma_node_id: anchor.id,
+        type: elementType(anchor),
+        rect: anchor.rect,
+        visual_description: describeElement(anchor),
+        is_component_instance: anchor.isComponentInstance,
+        container: true,
+        children: [combinedSubElement, ...extraChildren],
+      };
+    }
+
+    function processChildren(children) {
+      const result = [];
+      for (const child of children) {
+        if (child.visible === false) continue;
+
+        const groupId = emissionPointId.get(child.id);
+        if (groupId) {
+          result.push(buildCompositeElement(groupId));
+          continue;
+        }
+        if (consumedIds.has(child.id)) continue;
+
+        if (child.selected) {
+          const childElements = processChildren(child.children);
+          const el = {
+            id: uniqueId(child.name, child.id),
+            figma_node_id: child.id,
+            type: elementType(child),
+            rect: child.rect,
+            visual_description: describeElement(child),
+            text_content: child.figmaType === "TEXT" ? child.textContent : undefined,
+            is_component_instance: child.isComponentInstance,
+            children: childElements,
+          };
+          if (childElements.length > 0) el.container = true;
+          result.push(el);
+          continue;
+        }
+
+        result.push(...processChildren(child.children));
+      }
+      return result;
+    }
+
+    return { elements: processChildren(root.children), fallbackCaptures };
+  }
+
+  // ---- normalize.ts port ----
+
+  function scaleElement(el, scale) {
+    return {
+      ...el,
+      rect: { x: el.rect.x / scale, y: el.rect.y / scale, w: el.rect.w / scale, h: el.rect.h / scale },
+      children: el.children.map((child) => scaleElement(child, scale)),
+    };
+  }
+
+  function normalizeElementTree(reducedElements, frame, canvasScaler) {
+    const scale = computeScaleFactor(frame.sourceFrame, canvasScaler);
+    return {
+      source: "figma",
+      frame_id: frame.frameId,
+      source_frame: frame.sourceFrame,
+      canvas_reference: canvasScaler.referenceResolution,
+      canvas_match_mode: canvasScaler.matchMode,
+      canvas_match_value: canvasScaler.matchValue,
+      elements: reducedElements.map((el) => scaleElement(el, scale)),
+    };
+  }
+
+  // ---- wiring: raw tree -> {element_tree, element_thumbnails,
+  // element_fallback_captures} bundle, in one pass ----
+
+  function buildExportBundle() {
+    const bbox = tree.absoluteBoundingBox;
+    if (!bbox) throw new Error("buildExportBundle: root node has no absoluteBoundingBox");
+    const origin = { x: bbox.x, y: bbox.y };
+
+    const intermediateRoot = buildIntermediateNode(tree, origin);
+    const { elements: reducedElements, fallbackCaptures } = reduceFromSelection(intermediateRoot);
+    const elementTree = normalizeElementTree(
+      reducedElements,
+      { frameId: rootNodeId, sourceFrame: { w: bbox.width, h: bbox.height } },
+      CANVAS_SCALER_CONFIG,
+    );
+
+    const elementThumbnails = {};
+    collectThumbnails(intermediateRoot, elementThumbnails);
+
+    return {
+      element_tree: elementTree,
+      element_thumbnails: elementThumbnails,
+      element_fallback_captures: fallbackCaptures,
+    };
+  }
+
+  // Single bundled file, not three separate downloads - avoids the
+  // multi-download prompt/blocking behavior some browsers/webviews apply to
+  // a script triggering several downloads from one click. ReviewWindow reads
+  // this bundle directly (see Editor/Review/ReviewWindow.cs).
   function downloadExport() {
-    const json = JSON.stringify(buildExportNode(tree), null, 2);
+    const bundle = buildExportBundle();
+    const json = JSON.stringify(bundle, null, 2);
     const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${fileKey}__${rootNodeId.replace(":", "-")}.json`;
+    a.download = `${fileKey}__${rootNodeId.replace(":", "-")}.export.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();

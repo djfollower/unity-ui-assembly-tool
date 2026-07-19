@@ -5,23 +5,31 @@ using System.Linq;
 using UiAssemblerSlice.Editor.Assembler;
 using UiAssemblerSlice.Editor.Batch;
 using UiAssemblerSlice.Editor.Catalog;
+using UiAssemblerSlice.Editor.Matcher;
 using UnityEditor;
 using UnityEngine;
 
 namespace UiAssemblerSlice.Editor.Review
 {
-    /// Stage 3: runs the remaining Node-side pipeline (reduce-from-selection
-    /// -> match) against a Figma plugin export, shows one review row per
-    /// match-result.json entry (accept/reject/reassign), and assembles the
-    /// final prefab in-process - the same three calls RunAssemble.cs's
-    /// batchmode entry point makes, just triggered live instead of headless.
+    /// Stage 3: runs the matcher in-process against the Figma plugin's
+    /// exported bundle (element_tree + element_thumbnails +
+    /// element_fallback_captures - see figma-plugin/ui.html's
+    /// buildExportBundle), shows one review row per match result
+    /// (accept/reject/reassign), and assembles the final prefab in-process -
+    /// the same three calls RunAssemble.cs's batchmode entry point makes,
+    /// just triggered live instead of headless.
+    ///
+    /// No subprocess/Node involvement anymore (previously spawned
+    /// `npm run cli -- reduce-from-selection` + `-- match` via
+    /// PipelineRunner) - the plugin already emits a reduced element-tree
+    /// directly, and MatchElementTree.Run replaces the `match` CLI step.
     ///
     /// Known limitation, not fixed here: none of this window's state
     /// survives a domain reload (e.g. editing a C# script while the window
     /// is open) - all fields are plain `private`, deliberately not
-    /// [SerializeField], since a Dictionary/Texture2D/PipelineRunner aren't
-    /// things Unity's serializer should be attempting to persist. Re-run
-    /// "Load match-result.json for review" after a reload if needed.
+    /// [SerializeField], since a Dictionary/Texture2D aren't things Unity's
+    /// serializer should be attempting to persist. Re-run "Load
+    /// match-result.json for review" after a reload if needed.
     public class ReviewWindow : EditorWindow
     {
         [MenuItem("UI Assembler/Review Window")]
@@ -31,18 +39,13 @@ namespace UiAssemblerSlice.Editor.Review
         }
 
         // ---- user-entered inputs ----
-        private string _pluginExportPath = "";
+        // The single bundled JSON figma-plugin/ui.html's Download button
+        // produces (element_tree/element_thumbnails/element_fallback_captures
+        // top-level keys) - not a raw, pre-reduction plugin export anymore.
+        private string _exportBundlePath = "";
         private string _catalogPath = ".cache/catalog.json";
-        // GUI-launched Unity on macOS doesn't source shell rc files, so a
-        // nvm-installed npm can be invisible to a bare "npm" even though it
-        // works fine from a terminal - override here if "Run pipeline"
-        // fails to start with a "cannot find the specified file" error.
-        private string _npmPath = "npm";
 
         // ---- pipeline ----
-        private readonly PipelineRunner _pipeline = new PipelineRunner();
-        private readonly List<string> _logLines = new List<string>();
-        private Vector2 _logScroll;
         private string _statusMessage = "";
 
         // ---- loaded review data ----
@@ -81,7 +84,6 @@ namespace UiAssemblerSlice.Editor.Review
 
         private void OnDestroy()
         {
-            _pipeline.Stop();
             ClearTextureCache();
         }
 
@@ -111,11 +113,11 @@ namespace UiAssemblerSlice.Editor.Review
             EditorGUILayout.LabelField("Inputs", EditorStyles.boldLabel);
 
             EditorGUILayout.BeginHorizontal();
-            _pluginExportPath = EditorGUILayout.TextField("Plugin export JSON", _pluginExportPath);
+            _exportBundlePath = EditorGUILayout.TextField("Export bundle JSON", _exportBundlePath);
             if (GUILayout.Button("Browse...", GUILayout.Width(70)))
             {
-                var picked = EditorUtility.OpenFilePanel("Select Figma plugin export", "", "json");
-                if (!string.IsNullOrEmpty(picked)) _pluginExportPath = picked;
+                var picked = EditorUtility.OpenFilePanel("Select Figma plugin export bundle", "", "json");
+                if (!string.IsNullOrEmpty(picked)) _exportBundlePath = picked;
             }
             EditorGUILayout.EndHorizontal();
 
@@ -128,7 +130,6 @@ namespace UiAssemblerSlice.Editor.Review
             }
             EditorGUILayout.EndHorizontal();
 
-            _npmPath = EditorGUILayout.TextField("npm path", _npmPath);
             EditorGUILayout.LabelField("-> " + ElementTreePath, EditorStyles.miniLabel);
             EditorGUILayout.LabelField("-> " + MatchResultPath, EditorStyles.miniLabel);
             EditorGUILayout.LabelField("-> " + ElementThumbnailsPath, EditorStyles.miniLabel);
@@ -136,79 +137,68 @@ namespace UiAssemblerSlice.Editor.Review
 
         private void DrawPipelineControls()
         {
-            // Deliberately NOT gated on _pluginExportPath being non-empty -
+            // Deliberately NOT gated on _exportBundlePath being non-empty -
             // that used to silently disable the button with no feedback at
-            // all (confusing - "the button is locked"). Always clickable
-            // while not running; RunPipeline() itself reports a clear
-            // _statusMessage if the path is missing, same as any other
-            // input-validation error in this window.
-            GUI.enabled = !_pipeline.IsRunning;
-            if (GUILayout.Button("Run pipeline (reduce-from-selection -> match)"))
+            // all (confusing - "the button is locked"). Always clickable;
+            // RunMatcher() itself reports a clear _statusMessage if the path
+            // is missing, same as any other input-validation error here.
+            if (GUILayout.Button("Run matcher"))
             {
-                RunPipeline();
+                RunMatcher();
             }
 
             if (GUILayout.Button("Load match-result.json for review"))
             {
                 LoadReviewData();
             }
-            GUI.enabled = true;
 
-            if (string.IsNullOrWhiteSpace(_pluginExportPath))
+            if (string.IsNullOrWhiteSpace(_exportBundlePath))
             {
-                EditorGUILayout.HelpBox("Set a plugin export JSON path (or Browse...) to run the pipeline.", MessageType.None);
-            }
-
-            if (_logLines.Count > 0)
-            {
-                _logScroll = EditorGUILayout.BeginScrollView(_logScroll, GUILayout.Height(120));
-                EditorGUILayout.TextArea(string.Join("\n", _logLines), GUILayout.ExpandHeight(true));
-                EditorGUILayout.EndScrollView();
+                EditorGUILayout.HelpBox("Set an export bundle JSON path (or Browse...) to run the matcher.", MessageType.None);
             }
         }
 
-        private void RunPipeline()
+        // Runs the matcher in-process: unpacks the plugin's export bundle
+        // into the conventional .cache/ files (same fixed locations/shapes
+        // the old Node CLI wrote, so LoadReviewData/AssemblerJson's loaders
+        // don't need to change), then calls MatchElementTree.Run directly -
+        // no subprocess, no Node/npm involved.
+        private void RunMatcher()
         {
-            _logLines.Clear();
             var repoRoot = RepoRoot;
-            var pluginExportAbs = ResolvePath(_pluginExportPath, repoRoot);
+            var exportBundleAbs = ResolvePath(_exportBundlePath, repoRoot);
             var catalogAbs = ResolvePath(_catalogPath, repoRoot) ?? Path.Combine(repoRoot, ".cache", "catalog.json");
 
-            if (pluginExportAbs == null)
+            if (exportBundleAbs == null)
             {
-                _statusMessage = "Set a plugin export JSON path first.";
+                _statusMessage = "Set an export bundle JSON path first.";
                 return;
             }
 
-            var steps = new List<(string, string, string)>
+            try
             {
-                (_npmPath,
-                    $"run cli --workspace=@ui-assembler-slice/mcp-tool -- reduce-from-selection \"{pluginExportAbs}\" \"{ElementTreePath}\"",
-                    repoRoot),
-                (_npmPath,
-                    $"run cli --workspace=@ui-assembler-slice/mcp-tool -- match \"{ElementTreePath}\" \"{catalogAbs}\" \"{MatchResultPath}\"",
-                    repoRoot),
-            };
+                var bundle = (Dictionary<string, object>)JsonParser.Parse(File.ReadAllText(exportBundleAbs));
+                Directory.CreateDirectory(Path.GetDirectoryName(ElementTreePath) ?? ".");
+                File.WriteAllText(ElementTreePath, JsonWriter.Write(bundle["element_tree"]));
+                File.WriteAllText(ElementThumbnailsPath, JsonWriter.Write(bundle["element_thumbnails"]));
+                File.WriteAllText(ElementFallbackCapturesPath, JsonWriter.Write(bundle["element_fallback_captures"]));
 
-            _statusMessage = "Running pipeline...";
-            _pipeline.RunSteps(
-                steps,
-                onLogLine: line =>
-                {
-                    _logLines.Add(line);
-                    Repaint();
-                },
-                onAllFinished: () =>
-                {
-                    _statusMessage = "Pipeline finished";
-                    LoadReviewData();
-                    Repaint();
-                },
-                onFailed: err =>
-                {
-                    _statusMessage = $"Pipeline failed: {err}";
-                    Repaint();
-                });
+                var elementTree = AssemblerJson.LoadElementTree(ElementTreePath);
+                var catalog = AssemblerJson.LoadCatalog(catalogAbs);
+                var elementThumbnails = AssemblerJson.LoadElementThumbnails(ElementThumbnailsPath);
+                var elementFallbackCaptures = AssemblerJson.LoadElementFallbackCaptures(ElementFallbackCapturesPath);
+
+                var matchResults = MatchElementTree.Run(elementTree, catalog, elementThumbnails, elementFallbackCaptures);
+                AssemblerJson.WriteMatchResults(matchResults, MatchResultPath);
+
+                _statusMessage = "Matcher finished";
+                LoadReviewData();
+            }
+            catch (Exception ex)
+            {
+                _statusMessage = $"Matcher failed: {ex.Message}";
+                Debug.LogException(ex);
+            }
         }
 
         private void LoadReviewData()
