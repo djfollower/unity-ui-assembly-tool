@@ -67,8 +67,10 @@ namespace UiAssemblerSlice.Editor.Batch
             var extraPrefabPaths = (args.GetValueOrDefault("-extraPrefabPaths", "") ?? "")
                 .Split(',', StringSplitOptions.RemoveEmptyEntries)
                 .Select(p => p.Trim());
+            var labelFilter = args.GetValueOrDefault("-labelFilter", "");
 
-            Build(featureFolder, outputPath, cachePath, forceFull, extraPrefabPaths);
+            Build(featureFolder, outputPath, cachePath, forceFull, extraPrefabPaths,
+                string.IsNullOrWhiteSpace(labelFilter) ? null : labelFilter);
         }
 
         /// Does the actual scan/probe/render work - extracted from Run() so
@@ -89,20 +91,54 @@ namespace UiAssemblerSlice.Editor.Batch
             string cachePath,
             bool forceFull,
             IEnumerable<string> extraPrefabPaths,
+            string labelFilter = null,
             Action<int, int, string> onProgress = null,
             Func<bool> isCancelled = null)
         {
-            var feature = SanitizeFeatureName(featureFolder);
+            var usingLabel = !string.IsNullOrWhiteSpace(labelFilter);
+            // Folder mode: every asset in this run shares one feature name,
+            // same as always - existing catalog ids (e.g.
+            // "UIElements__ButtonFrame", hard-referenced by
+            // fixtures/golden-matches.json) depend on this staying
+            // unchanged. Label mode has no such single folder to name a
+            // feature after - discovery can span dozens of unrelated,
+            // scattered folders project-wide (see HANDOFF.md) - so `feature`
+            // is instead derived per-asset, from each one's own containing
+            // folder (FeatureFromAssetPath below).
+            var runFeature = usingLabel ? null : SanitizeFeatureName(featureFolder);
 
-            Debug.Log($"RunCatalogBuild: scanning {featureFolder} (feature={feature})");
+            Debug.Log(usingLabel
+                ? $"RunCatalogBuild: scanning by label '{labelFilter}' (project-wide)"
+                : $"RunCatalogBuild: scanning {featureFolder} (feature={runFeature})");
 
-            var discovered = AssetDiscovery.DiscoverFeatureFolder(featureFolder);
+            var discovered = usingLabel
+                ? AssetDiscovery.DiscoverByLabel(labelFilter)
+                : AssetDiscovery.DiscoverFeatureFolder(featureFolder);
             var sprites = discovered.Where(a => a.AssetType == "sprite").ToList();
-            var skippedPrefabs = discovered.Where(a => a.AssetType == "prefab").ToList();
-            if (skippedPrefabs.Count > 0)
+            var discoveredPrefabs = discovered.Where(a => a.AssetType == "prefab").ToList();
+
+            // Label mode: a prefab only shows up in `discovered` because
+            // MarkCatalogEligible explicitly labeled that specific file
+            // (never a whole folder's worth - see its own doc comment) -
+            // same trust level -extraPrefabPaths already has, so include it
+            // directly. Folder mode: unchanged - a scanned feature folder
+            // can hold dozens of unrelated, complex prefabs outside this
+            // feature's scope, so folder-discovered prefabs still need
+            // explicit -extraPrefabPaths opt-in rather than automatic
+            // inclusion.
+            List<DiscoveredAsset> includedDiscoveredPrefabs;
+            if (usingLabel)
             {
-                Debug.LogWarning($"RunCatalogBuild: skipping {skippedPrefabs.Count} prefab(s) from {featureFolder} - " +
-                                  "not explicitly requested via -extraPrefabPaths.");
+                includedDiscoveredPrefabs = discoveredPrefabs;
+            }
+            else
+            {
+                includedDiscoveredPrefabs = new List<DiscoveredAsset>();
+                if (discoveredPrefabs.Count > 0)
+                {
+                    Debug.LogWarning($"RunCatalogBuild: skipping {discoveredPrefabs.Count} prefab(s) from {featureFolder} - " +
+                                      "not explicitly requested via -extraPrefabPaths.");
+                }
             }
 
             var extraPrefabs = (extraPrefabPaths ?? Array.Empty<string>())
@@ -113,10 +149,16 @@ namespace UiAssemblerSlice.Editor.Batch
             var thumbnailsDir = Path.Combine(catalogDir, "thumbnails");
             Directory.CreateDirectory(thumbnailsDir);
 
-            var assetsThisRun = sprites.Concat(extraPrefabs).ToList();
+            var assetsThisRun = sprites.Concat(includedDiscoveredPrefabs).Concat(extraPrefabs).ToList();
             var cache = forceFull ? new Dictionary<string, CacheRecord>() : LoadCache(cachePath);
             var newCache = new Dictionary<string, CacheRecord>();
-            var entries = new List<CatalogEntryData>();
+            // Keyed by id, not a plain List: two assets can compute the
+            // same id (see the duplicate-id warning below) - a List would
+            // silently write both into catalog.json, and
+            // ReviewWindow.LoadReviewData's `_catalog.ToDictionary(c => c.Id)`
+            // would then throw on load. Keying here makes last-wins actually
+            // true instead of just logged.
+            var entriesById = new Dictionary<string, CatalogEntryData>();
             var reused = 0;
             var rebuilt = 0;
 
@@ -137,7 +179,23 @@ namespace UiAssemblerSlice.Editor.Batch
 
                 var hash = AssetDatabase.GetAssetDependencyHash(asset.Path).ToString();
                 var name = Path.GetFileNameWithoutExtension(asset.Path);
+                var feature = runFeature ?? FeatureFromAssetPath(asset.Path);
                 var id = $"{feature}__{name}";
+                // Cheap safety net, not a full resolution: two assets in
+                // different scattered folders can share both a folder name
+                // and a filename (e.g. two unrelated "Icons/star.png"s),
+                // which collides here since `feature` is just the immediate
+                // parent folder name, not a full disambiguating path. Loud,
+                // not silent - the later one (in assetsThisRun order) wins
+                // in entriesById below, so at least it's a deterministic,
+                // logged overwrite rather than a silent duplicate-id crash
+                // downstream (ReviewWindow's `_catalog.ToDictionary(c => c.Id)`).
+                if (entriesById.ContainsKey(id))
+                {
+                    Debug.LogWarning($"RunCatalogBuild: duplicate catalog id '{id}' from '{asset.Path}' - " +
+                                      "overwrites an earlier entry with the same id (same folder name + filename " +
+                                      "collision from a different location). Rename one of them to disambiguate.");
+                }
                 // Reused across the cache-hit and cache-miss branches: even
                 // a reused entry's thumbnail file lives at this id-derived
                 // path (ids are stable per asset path/feature scope, not
@@ -199,7 +257,7 @@ namespace UiAssemblerSlice.Editor.Batch
                     rebuilt++;
                 }
 
-                entries.Add(entry);
+                entriesById[id] = entry;
                 // Stored under the asset's own path, not `id` - a feature-
                 // folder rename shouldn't force a re-render (see class doc
                 // comment), and the reused entry above already gets this
@@ -207,6 +265,7 @@ namespace UiAssemblerSlice.Editor.Batch
                 newCache[asset.Path] = new CacheRecord { Hash = hash, Entry = entry };
             }
 
+            var entries = entriesById.Values.ToList();
             PruneOrphanedThumbnails(thumbnailsDir, entries);
 
             File.WriteAllText(outputPath, ToJson(entries));
@@ -323,6 +382,17 @@ namespace UiAssemblerSlice.Editor.Batch
         {
             var last = featureFolder.TrimEnd('/').Split('/').Last();
             return last.Replace(" ", "");
+        }
+
+        // Label mode's per-asset equivalent of the folder mode's single
+        // SanitizeFeatureName(featureFolder) call - tags each asset with
+        // its own immediate containing folder rather than one shared name,
+        // since label-mode discovery has no single scanned folder to name a
+        // feature after (see Build's own comment on this).
+        private static string FeatureFromAssetPath(string assetPath)
+        {
+            var dir = (Path.GetDirectoryName(assetPath) ?? "").Replace('\\', '/');
+            return SanitizeFeatureName(dir);
         }
 
         private struct CatalogEntryData

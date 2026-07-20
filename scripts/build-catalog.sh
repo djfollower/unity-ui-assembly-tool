@@ -18,6 +18,14 @@ FEATURE_FOLDER="${FEATURE_FOLDER:-Assets/Textures/UI/UI Elements}"
 # cases (ButtonFrameTint covers Gate 2's tinted-asset requirement). See
 # RunCatalogBuild.cs's comment on why this isn't a whole-folder scan.
 EXTRA_PREFAB_PATHS="${EXTRA_PREFAB_PATHS:-Assets/Prefabs/UI/ButtonFrame.prefab,Assets/Prefabs/UI/ButtonFrameTint.prefab,Assets/Prefabs/UI/Scrim.prefab}"
+# Project-wide alternative to FEATURE_FOLDER, for catalog-eligible sprites
+# scattered across dozens of unrelated folders with no common parent - takes
+# priority over FEATURE_FOLDER when set. Sprites need this Unity Asset Label
+# applied first (see MarkCatalogEligible.cs / Project window right-click >
+# UI Assembler > Mark Sprites As Catalog-Eligible). Unset by default - the
+# fixture project has no scattered-folder problem, so folder mode stays the
+# default.
+LABEL_FILTER="${LABEL_FILTER:-}"
 OUTPUT_PATH="${OUTPUT_PATH:-$REPO_ROOT/.cache/catalog.json}"
 CACHE_PATH="${CACHE_PATH:-$REPO_ROOT/.cache/catalog-build-cache.json}"
 # Skips the incremental build cache entirely, re-probing/re-rendering every
@@ -29,6 +37,11 @@ LOG_PATH="${LOG_PATH:-$REPO_ROOT/scripts/logs/build-catalog.log}"
 
 mkdir -p "$(dirname "$OUTPUT_PATH")" "$(dirname "$LOG_PATH")"
 
+EXTRA_ARGS=()
+if [[ -n "$LABEL_FILTER" ]]; then
+  EXTRA_ARGS+=(-labelFilter "$LABEL_FILTER")
+fi
+
 "$UNITY_APP" \
   -batchmode \
   -projectPath "$PROJECT_PATH" \
@@ -38,6 +51,7 @@ mkdir -p "$(dirname "$OUTPUT_PATH")" "$(dirname "$LOG_PATH")"
   -outputPath "$OUTPUT_PATH" \
   -cachePath "$CACHE_PATH" \
   -forceFull "$FORCE_FULL" \
+  "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}" \
   -quit \
   -logFile "$LOG_PATH"
 

@@ -60,6 +60,7 @@ namespace UiAssemblerSlice.Editor.Review
         // ---- catalog build inputs ----
         private string _catalogFeatureFolder = "Assets/Textures/UI/UI Elements";
         private string _catalogExtraPrefabPaths = "";
+        private string _catalogLabelFilter = "";
         private bool _catalogForceFull;
         private bool _catalogCancelRequested;
 
@@ -181,9 +182,12 @@ namespace UiAssemblerSlice.Editor.Review
         {
             EditorGUILayout.LabelField("Build Catalog", EditorStyles.boldLabel);
 
+            var usingLabel = !string.IsNullOrWhiteSpace(_catalogLabelFilter);
+
+            EditorGUI.BeginDisabledGroup(usingLabel);
             EditorGUILayout.BeginHorizontal();
             _catalogFeatureFolder = EditorGUILayout.TextField(
-                new GUIContent("Feature folder", "Project-relative folder to scan for sprites, e.g. Assets/Textures/UI/UI Elements."),
+                new GUIContent("Feature folder", "Project-relative folder to scan for sprites, e.g. Assets/Textures/UI/UI Elements. Ignored when Label filter below is set."),
                 _catalogFeatureFolder);
             if (GUILayout.Button("Browse...", GUILayout.Width(70)))
             {
@@ -197,16 +201,31 @@ namespace UiAssemblerSlice.Editor.Review
                 }
             }
             EditorGUILayout.EndHorizontal();
+            EditorGUI.EndDisabledGroup();
+
+            // Project-wide alternative to Feature folder - for catalog-
+            // eligible sprites/prefab templates scattered across dozens of
+            // unrelated folders with no common parent, where a single
+            // folder scan (or a hand-typed Extra prefab paths list) can't
+            // cover them. Requires the assets to already carry this Unity
+            // Asset Label - see MarkCatalogEligible.cs (Project window
+            // right-click > "UI Assembler > Mark As Catalog-Eligible") for
+            // the one-time bulk-labeling step. When set, labeled prefabs
+            // are included automatically alongside labeled sprites - Extra
+            // prefab paths below still works too, on top of it.
+            _catalogLabelFilter = EditorGUILayout.TextField(
+                new GUIContent("Label filter", $"Asset Label to scan project-wide instead of Feature folder (e.g. \"{MarkCatalogEligible.Label}\"). Takes priority over Feature folder when set. Covers both sprites and prefabs - sprites need this label applied first, so do specific prefab files (Project window right-click > UI Assembler > Mark As Catalog-Eligible)."),
+                _catalogLabelFilter);
 
             _catalogExtraPrefabPaths = EditorGUILayout.TextField(
-                new GUIContent("Extra prefab paths", "Comma-separated project-relative prefab paths outside the feature folder to include (e.g. Assets/Prefabs/UI/ButtonFrame.prefab,...)."),
+                new GUIContent("Extra prefab paths", "Comma-separated project-relative prefab paths to include in addition to any labeled prefabs above (e.g. Assets/Prefabs/UI/ButtonFrame.prefab,...)."),
                 _catalogExtraPrefabPaths);
 
             _catalogForceFull = EditorGUILayout.ToggleLeft(
                 new GUIContent("Force full rebuild", "Ignore the incremental build cache and re-probe/re-render every asset. Slow at real-project scale (thousands of assets) - only needed after changing RunCatalogBuild/RenderMetadataProbe/RenderedThumbnail themselves."),
                 _catalogForceFull);
 
-            if (GUILayout.Button("Build Catalog"))
+            if (GUILayout.Button(usingLabel ? $"Build Catalog (by label '{_catalogLabelFilter}')" : "Build Catalog"))
             {
                 BuildCatalog();
             }
@@ -232,6 +251,7 @@ namespace UiAssemblerSlice.Editor.Review
                     cacheBuildPath,
                     _catalogForceFull,
                     extraPrefabPaths,
+                    labelFilter: string.IsNullOrWhiteSpace(_catalogLabelFilter) ? null : _catalogLabelFilter,
                     onProgress: (i, total, assetPath) =>
                     {
                         // Throttled - at real-project scale (thousands of
