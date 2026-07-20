@@ -58,6 +58,40 @@ namespace UiAssemblerSlice.Editor.Batch
             var outputPath = args.GetValueOrDefault("-outputPath", DefaultOutputPath());
             var cachePath = args.GetValueOrDefault("-cachePath", DefaultCachePath());
             var forceFull = args.GetValueOrDefault("-forceFull", "false") == "true";
+            // Explicit opt-in list rather than a whole-folder scan: this
+            // project's other prefab folders (Assets/Prefabs/UI/ etc.) hold
+            // dozens of unrelated, complex prefabs outside this feature's
+            // scope - only pull in specific ones added as fixture test cases
+            // (e.g. a hand-made tinted variant for Gate 2's tinted-asset
+            // requirement).
+            var extraPrefabPaths = (args.GetValueOrDefault("-extraPrefabPaths", "") ?? "")
+                .Split(',', StringSplitOptions.RemoveEmptyEntries)
+                .Select(p => p.Trim());
+
+            Build(featureFolder, outputPath, cachePath, forceFull, extraPrefabPaths);
+        }
+
+        /// Does the actual scan/probe/render work - extracted from Run() so
+        /// the Review Window's "Build Catalog" button can drive the same
+        /// logic interactively (with a progress bar + cancel), not just
+        /// batch mode's -executeMethod entry point. `onProgress`/`isCancelled`
+        /// are optional: Run() itself passes neither (no UI to drive in
+        /// batch mode).
+        ///
+        /// On cancel: the loop stops but outputPath/cachePath are
+        /// deliberately NOT written - writing a partial `entries` list would
+        /// silently drop catalog entries for every not-yet-processed asset.
+        /// Re-running (interactively or via batch) just picks back up, since
+        /// the previously-saved cache file is untouched.
+        public static BuildResult Build(
+            string featureFolder,
+            string outputPath,
+            string cachePath,
+            bool forceFull,
+            IEnumerable<string> extraPrefabPaths,
+            Action<int, int, string> onProgress = null,
+            Func<bool> isCancelled = null)
+        {
             var feature = SanitizeFeatureName(featureFolder);
 
             Debug.Log($"RunCatalogBuild: scanning {featureFolder} (feature={feature})");
@@ -71,17 +105,9 @@ namespace UiAssemblerSlice.Editor.Batch
                                   "not explicitly requested via -extraPrefabPaths.");
             }
 
-            // Explicit opt-in list rather than a whole-folder scan: this
-            // project's other prefab folders (Assets/Prefabs/UI/ etc.) hold
-            // dozens of unrelated, complex prefabs outside this feature's
-            // scope - only pull in specific ones added as fixture test cases
-            // (e.g. a hand-made tinted variant for Gate 2's tinted-asset
-            // requirement).
-            var extraPrefabPaths = (args.GetValueOrDefault("-extraPrefabPaths", "") ?? "")
-                .Split(',', StringSplitOptions.RemoveEmptyEntries)
-                .Select(p => p.Trim());
-            var extraPrefabs = extraPrefabPaths.Select(p => new DiscoveredAsset(
-                p, AssetDatabase.AssetPathToGUID(p), "prefab", Array.Empty<string>()));
+            var extraPrefabs = (extraPrefabPaths ?? Array.Empty<string>())
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Select(p => new DiscoveredAsset(p, AssetDatabase.AssetPathToGUID(p), "prefab", Array.Empty<string>()));
 
             var catalogDir = Path.GetDirectoryName(outputPath) ?? ".";
             var thumbnailsDir = Path.Combine(catalogDir, "thumbnails");
@@ -94,8 +120,21 @@ namespace UiAssemblerSlice.Editor.Batch
             var reused = 0;
             var rebuilt = 0;
 
-            foreach (var asset in assetsThisRun)
+            for (var i = 0; i < assetsThisRun.Count; i++)
             {
+                if (isCancelled != null && isCancelled())
+                {
+                    Debug.LogWarning($"RunCatalogBuild: cancelled after {reused + rebuilt}/{assetsThisRun.Count} asset(s) - {outputPath} left unchanged.");
+                    return new BuildResult
+                    {
+                        Reused = reused, Rebuilt = rebuilt, Total = assetsThisRun.Count,
+                        OutputPath = outputPath, Cancelled = true,
+                    };
+                }
+
+                var asset = assetsThisRun[i];
+                onProgress?.Invoke(i, assetsThisRun.Count, asset.Path);
+
                 var hash = AssetDatabase.GetAssetDependencyHash(asset.Path).ToString();
                 var name = Path.GetFileNameWithoutExtension(asset.Path);
                 var id = $"{feature}__{name}";
@@ -174,6 +213,21 @@ namespace UiAssemblerSlice.Editor.Batch
             SaveCache(cachePath, newCache);
             Debug.Log($"RunCatalogBuild: wrote {entries.Count} entries to {outputPath} " +
                       $"({reused} reused, {rebuilt} rebuilt; cache: {cachePath})");
+
+            return new BuildResult
+            {
+                Reused = reused, Rebuilt = rebuilt, Total = assetsThisRun.Count,
+                OutputPath = outputPath, Cancelled = false,
+            };
+        }
+
+        public struct BuildResult
+        {
+            public int Reused;
+            public int Rebuilt;
+            public int Total;
+            public string OutputPath;
+            public bool Cancelled;
         }
 
         // Repair utility: catalog.json can carry entries this file's own

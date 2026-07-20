@@ -8,8 +8,14 @@
 set -euo pipefail
 
 UNITY_APP="${UNITY_APP:-/Applications/Unity/Hub/Editor/2022.3.62f2/Unity.app/Contents/MacOS/Unity}"
-PROJECT_PATH="${PROJECT_PATH:-/Users/dungphan/Melon}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$REPO_ROOT/scripts/lib/detect-project-path.sh"
+# Auto-detected from the UPM manifest of whichever sibling Unity project has
+# this package installed - set PROJECT_PATH explicitly to override (e.g. if
+# more than one project references this package).
+if [ -z "${PROJECT_PATH:-}" ]; then
+  PROJECT_PATH="$(detect_project_path "$REPO_ROOT")" || exit 1
+fi
 
 # fixtures/golden-elements.json stands in for a produced element-tree.json
 # (same convention already documented in HANDOFF.md for the matcher/assembler).

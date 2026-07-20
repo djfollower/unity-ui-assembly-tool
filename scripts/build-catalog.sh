@@ -5,13 +5,19 @@
 set -euo pipefail
 
 UNITY_APP="${UNITY_APP:-/Applications/Unity/Hub/Editor/2022.3.62f2/Unity.app/Contents/MacOS/Unity}"
-PROJECT_PATH="${PROJECT_PATH:-/Users/dungphan/Melon}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$REPO_ROOT/scripts/lib/detect-project-path.sh"
+# Auto-detected from the UPM manifest of whichever sibling Unity project has
+# this package installed - set PROJECT_PATH explicitly to override (e.g. if
+# more than one project references this package).
+if [ -z "${PROJECT_PATH:-}" ]; then
+  PROJECT_PATH="$(detect_project_path "$REPO_ROOT")" || exit 1
+fi
 FEATURE_FOLDER="${FEATURE_FOLDER:-Assets/Textures/UI/UI Elements}"
 # Explicit opt-in prefabs outside the feature folder, added as fixture test
 # cases (ButtonFrameTint covers Gate 2's tinted-asset requirement). See
 # RunCatalogBuild.cs's comment on why this isn't a whole-folder scan.
 EXTRA_PREFAB_PATHS="${EXTRA_PREFAB_PATHS:-Assets/Prefabs/UI/ButtonFrame.prefab,Assets/Prefabs/UI/ButtonFrameTint.prefab,Assets/Prefabs/UI/Scrim.prefab}"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_PATH="${OUTPUT_PATH:-$REPO_ROOT/.cache/catalog.json}"
 CACHE_PATH="${CACHE_PATH:-$REPO_ROOT/.cache/catalog-build-cache.json}"
 # Skips the incremental build cache entirely, re-probing/re-rendering every
