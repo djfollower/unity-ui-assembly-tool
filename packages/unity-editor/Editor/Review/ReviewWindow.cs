@@ -214,7 +214,7 @@ namespace UiAssemblerSlice.Editor.Review
             // are included automatically alongside labeled sprites - Extra
             // prefab paths below still works too, on top of it.
             _catalogLabelFilter = EditorGUILayout.TextField(
-                new GUIContent("Label filter", $"Asset Label to scan project-wide instead of Feature folder (e.g. \"{MarkCatalogEligible.Label}\"). Takes priority over Feature folder when set. Covers both sprites and prefabs - sprites need this label applied first, so do specific prefab files (Project window right-click > UI Assembler > Mark As Catalog-Eligible)."),
+                new GUIContent("Label filter", $"Asset Label to scan project-wide instead of Feature folder (e.g. \"{MarkCatalogEligible.Label}\"). Takes priority over Feature folder when set. A labeled FOLDER expands to its sprites automatically at build time (label the folder, not each sprite - see MarkCatalogEligible.cs); individual prefab files need labeling directly (Project window right-click > UI Assembler > Mark As Catalog-Eligible)."),
                 _catalogLabelFilter);
 
             _catalogExtraPrefabPaths = EditorGUILayout.TextField(

@@ -56,24 +56,62 @@ namespace UiAssemblerSlice.Editor.Catalog
         /// templates are scattered across dozens of unrelated folders with
         /// no common parent (see HANDOFF.md), a folder scan
         /// (`DiscoverFeatureFolder` above) can't cover them without
-        /// enumerating every folder by hand. The label itself has to be
-        /// applied to assets ahead of time - see `MarkCatalogEligible.cs`'s
-        /// bulk-labeling utility, which is deliberately more cautious about
-        /// prefabs than sprites (only directly-selected prefab files get
-        /// labeled, never a whole folder's worth) - so a prefab showing up
-        /// here already carries the same "explicitly opted in" trust
-        /// `RunCatalogBuild.Build`'s folder-mode `-extraPrefabPaths` list
-        /// has, unlike a prefab merely found sitting in a scanned folder.
+        /// enumerating every folder by hand.
+        ///
+        /// Labels are applied ahead of time via `MarkCatalogEligible.cs`,
+        /// but deliberately NOT one-sprite-at-a-time: a label on the
+        /// containing FOLDER is expanded to its sprites recursively right
+        /// here, at discovery time, rather than being baked into every
+        /// individual sprite's own .meta file. Two real reasons, not just
+        /// preference: (1) confirmed for real that labeling ~4,400
+        /// individual sprites took 25+ minutes and never finished (had to
+        /// force-kill Unity) even after batching the AssetDatabase calls -
+        /// labeling a few dozen folders instead is inherently fast; (2)
+        /// touching thousands of sprites' .meta files makes for a huge, hard
+        /// -to-review git diff for what's conceptually a one-line policy
+        /// change ("this folder is catalog content now"). A directly-
+        /// labeled individual sprite (not via a folder) is also still
+        /// supported, for the rare one-off case outside any labeled folder.
+        ///
+        /// Prefabs are NOT expanded from labeled folders the same way -
+        /// only directly-selected/labeled prefab files ever show up here,
+        /// same trust level `RunCatalogBuild.Build`'s folder-mode
+        /// `-extraPrefabPaths` list already has (a folder can hold dozens of
+        /// unrelated, complex prefabs outside catalog scope - see
+        /// MarkCatalogEligible.cs's own doc comment).
         public static List<DiscoveredAsset> DiscoverByLabel(string label)
         {
             var results = new List<DiscoveredAsset>();
             var spritePaths = new HashSet<string>();
 
-            foreach (var guid in AssetDatabase.FindAssets($"t:Sprite l:{label}"))
+            void AddSprite(string guid)
             {
                 var path = AssetDatabase.GUIDToAssetPath(guid);
-                if (!spritePaths.Add(path)) continue;
-                results.Add(new DiscoveredAsset(path, guid, "sprite", Array.Empty<string>()));
+                if (spritePaths.Add(path))
+                {
+                    results.Add(new DiscoveredAsset(path, guid, "sprite", Array.Empty<string>()));
+                }
+            }
+
+            // Directly-labeled individual sprites.
+            foreach (var guid in AssetDatabase.FindAssets($"t:Sprite l:{label}"))
+            {
+                AddSprite(guid);
+            }
+
+            // Labeled folders - recursively expanded to their sprites here
+            // instead of at label-application time (see method doc comment
+            // on why).
+            var labeledFolders = AssetDatabase.FindAssets($"l:{label}")
+                .Select(AssetDatabase.GUIDToAssetPath)
+                .Distinct()
+                .Where(AssetDatabase.IsValidFolder);
+            foreach (var folder in labeledFolders)
+            {
+                foreach (var guid in AssetDatabase.FindAssets("t:Sprite", new[] { folder }))
+                {
+                    AddSprite(guid);
+                }
             }
 
             foreach (var guid in AssetDatabase.FindAssets($"t:Prefab l:{label}"))
