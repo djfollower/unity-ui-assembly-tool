@@ -51,9 +51,9 @@ validated against `packages/contracts/schemas/`:
 
 - `packages/mcp-tool/` — Node/TS. Figma adapter, LLM reduction, matcher. No MCP server wrapper
   yet for the slice (`src/cli.ts` is a bare subcommand dispatcher invoked directly).
-- `packages/unity-editor/` — C#. A local UPM package (`com.ui-assembler-slice.editor`) consumed
+- `packages/unity-editor/` — C#. A local UPM package (`com.dungphan.ui-assembler.editor`) consumed
   by the target Unity project via `Packages/manifest.json`
-  (`"com.ui-assembler-slice.editor": "file:../../unity-ui-assembly-tool/packages/unity-editor"`).
+  (`"com.dungphan.ui-assembler.editor": "file:../../unity-ui-assembly-tool/packages/unity-editor"`).
   Batch-mode entry points only (`Editor/Batch/`); no in-Editor UI for this slice.
 - `packages/contracts/` — shared JSON Schemas (`schemas/*.schema.json`) are the **source of
   truth**; `src/generated/*.ts` is generated from them via `json-schema-to-typescript` — never

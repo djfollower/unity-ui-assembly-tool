@@ -1,5 +1,5 @@
 {
-  "name": "com.ui-assembler-slice.editor",
+  "name": "com.dungphan.ui-assembler.editor",
   "version": "0.1.0",
   "displayName": "UI Assembler Slice - Editor",
   "description": "Catalog probe + minimal assembler for the vertical slice. Batch-mode entry points only; the Match Review Window is explicitly deferred.",

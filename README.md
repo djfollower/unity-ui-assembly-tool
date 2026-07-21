@@ -32,7 +32,7 @@ npm run build   # generates contracts/src/types.ts from the schemas, validates t
 ```
 
 `packages/unity-editor` is a local UPM package; import it into the target Unity project via
-`Packages/manifest.json` (`"com.ui-assembler-slice.editor": "file:../../unity-ui-assembly-tool/packages/unity-editor"`).
+`Packages/manifest.json` (`"com.dungphan.ui-assembler.editor": "file:../../unity-ui-assembly-tool/packages/unity-editor"`).
 
 ### Figma access
 
