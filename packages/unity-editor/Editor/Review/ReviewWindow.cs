@@ -44,6 +44,25 @@ namespace UiAssemblerSlice.Editor.Review
         // top-level keys) - not a raw, pre-reduction plugin export anymore.
         private string _exportBundlePath = "";
         private string _catalogPath = ".cache/catalog.json";
+        // Where to read/write element-tree.json / match-result.json /
+        // element-thumbnails.json / element-fallback-captures.json. Blank
+        // (the default) falls back to RepoRoot's own guess below, for
+        // backward compatibility with the "monorepo cloned as a sibling
+        // folder next to the Unity project" convention - but that guess
+        // breaks whenever this package is installed via a git-URL UPM
+        // dependency instead of a local sibling checkout (it resolves into
+        // Library/PackageCache's hashed folder, not a sibling
+        // "unity-ui-assembly-tool" directory), and is fragile in general
+        // across drive letters/OSes. Set this explicitly instead of relying
+        // on the guess if RunMatcher/LoadReviewData can't find their files.
+        private string _cacheFolderPath = "";
+
+        // ---- catalog build inputs ----
+        private string _catalogFeatureFolder = "Assets/Textures/UI/UI Elements";
+        private string _catalogExtraPrefabPaths = "";
+        private string _catalogLabelFilter = "";
+        private bool _catalogForceFull;
+        private bool _catalogCancelRequested;
 
         // ---- pipeline ----
         private string _statusMessage = "";
@@ -67,14 +86,19 @@ namespace UiAssemblerSlice.Editor.Review
         private static string RepoRoot =>
             Path.GetFullPath(Path.Combine(Application.dataPath, "..", "..", "unity-ui-assembly-tool"));
 
-        // Fixed .cache/-relative outputs, not user-entered - matches
-        // cli.ts's own defaults exactly, so pointing the pipeline steps at
-        // these explicit output paths and reading them back afterward is
-        // guaranteed consistent.
-        private string ElementTreePath => Path.Combine(RepoRoot, ".cache", "element-tree.json");
-        private string MatchResultPath => Path.Combine(RepoRoot, ".cache", "match-result.json");
-        private string ElementThumbnailsPath => Path.Combine(RepoRoot, ".cache", "element-thumbnails.json");
-        private string ElementFallbackCapturesPath => Path.Combine(RepoRoot, ".cache", "element-fallback-captures.json");
+        // Resolves to _cacheFolderPath when set (absolute, or relative to
+        // RepoRoot), else falls back to RepoRoot's own guessed .cache/ -
+        // see _cacheFolderPath's own comment on why that guess isn't always
+        // reliable.
+        private string CacheFolder =>
+            string.IsNullOrWhiteSpace(_cacheFolderPath)
+                ? Path.Combine(RepoRoot, ".cache")
+                : ResolvePath(_cacheFolderPath, RepoRoot);
+
+        private string ElementTreePath => Path.Combine(CacheFolder, "element-tree.json");
+        private string MatchResultPath => Path.Combine(CacheFolder, "match-result.json");
+        private string ElementThumbnailsPath => Path.Combine(CacheFolder, "element-thumbnails.json");
+        private string ElementFallbackCapturesPath => Path.Combine(CacheFolder, "element-fallback-captures.json");
 
         private static string ResolvePath(string userPath, string repoRoot)
         {
@@ -90,6 +114,8 @@ namespace UiAssemblerSlice.Editor.Review
         private void OnGUI()
         {
             DrawInputs();
+            EditorGUILayout.Space();
+            DrawCatalogBuildSection();
             EditorGUILayout.Space();
             DrawPipelineControls();
             EditorGUILayout.Space();
@@ -130,9 +156,129 @@ namespace UiAssemblerSlice.Editor.Review
             }
             EditorGUILayout.EndHorizontal();
 
+            EditorGUILayout.BeginHorizontal();
+            _cacheFolderPath = EditorGUILayout.TextField(
+                new GUIContent("Cache folder", "Leave blank to use the sibling-repo-checkout guess. Set explicitly if this package was installed via a git URL, or if RunMatcher/Load can't find their files."),
+                _cacheFolderPath);
+            if (GUILayout.Button("Browse...", GUILayout.Width(70)))
+            {
+                var picked = EditorUtility.OpenFolderPanel("Select cache folder", "", "");
+                if (!string.IsNullOrEmpty(picked)) _cacheFolderPath = picked;
+            }
+            EditorGUILayout.EndHorizontal();
+
             EditorGUILayout.LabelField("-> " + ElementTreePath, EditorStyles.miniLabel);
             EditorGUILayout.LabelField("-> " + MatchResultPath, EditorStyles.miniLabel);
             EditorGUILayout.LabelField("-> " + ElementThumbnailsPath, EditorStyles.miniLabel);
+        }
+
+        // Drives RunCatalogBuild.Build in-process against the target Unity
+        // project - the same logic scripts/build-catalog.sh runs headless,
+        // just triggered live with a progress bar so a real project's
+        // catalog (thousands of assets, not this fixture's 65) doesn't look
+        // like a frozen Editor. Writes to the same _catalogPath the rest of
+        // this window already reads from.
+        private void DrawCatalogBuildSection()
+        {
+            EditorGUILayout.LabelField("Build Catalog", EditorStyles.boldLabel);
+
+            var usingLabel = !string.IsNullOrWhiteSpace(_catalogLabelFilter);
+
+            EditorGUI.BeginDisabledGroup(usingLabel);
+            EditorGUILayout.BeginHorizontal();
+            _catalogFeatureFolder = EditorGUILayout.TextField(
+                new GUIContent("Feature folder", "Project-relative folder to scan for sprites, e.g. Assets/Textures/UI/UI Elements. Ignored when Label filter below is set."),
+                _catalogFeatureFolder);
+            if (GUILayout.Button("Browse...", GUILayout.Width(70)))
+            {
+                var picked = EditorUtility.OpenFolderPanel("Select feature folder", Application.dataPath, "");
+                if (!string.IsNullOrEmpty(picked))
+                {
+                    // OpenFolderPanel returns an absolute OS path; Unity
+                    // wants it project-relative ("Assets/...").
+                    var assetsIndex = picked.IndexOf("Assets", StringComparison.Ordinal);
+                    _catalogFeatureFolder = assetsIndex >= 0 ? picked.Substring(assetsIndex) : picked;
+                }
+            }
+            EditorGUILayout.EndHorizontal();
+            EditorGUI.EndDisabledGroup();
+
+            // Project-wide alternative to Feature folder - for catalog-
+            // eligible sprites/prefab templates scattered across dozens of
+            // unrelated folders with no common parent, where a single
+            // folder scan (or a hand-typed Extra prefab paths list) can't
+            // cover them. Requires the assets to already carry this Unity
+            // Asset Label - see MarkCatalogEligible.cs (Project window
+            // right-click > "UI Assembler > Mark As Catalog-Eligible") for
+            // the one-time bulk-labeling step. When set, labeled prefabs
+            // are included automatically alongside labeled sprites - Extra
+            // prefab paths below still works too, on top of it.
+            _catalogLabelFilter = EditorGUILayout.TextField(
+                new GUIContent("Label filter", $"Asset Label to scan project-wide instead of Feature folder (e.g. \"{MarkCatalogEligible.Label}\"). Takes priority over Feature folder when set. A labeled FOLDER expands to its sprites automatically at build time (label the folder, not each sprite - see MarkCatalogEligible.cs); individual prefab files need labeling directly (Project window right-click > UI Assembler > Mark As Catalog-Eligible)."),
+                _catalogLabelFilter);
+
+            _catalogExtraPrefabPaths = EditorGUILayout.TextField(
+                new GUIContent("Extra prefab paths", "Comma-separated project-relative prefab paths to include in addition to any labeled prefabs above (e.g. Assets/Prefabs/UI/ButtonFrame.prefab,...)."),
+                _catalogExtraPrefabPaths);
+
+            _catalogForceFull = EditorGUILayout.ToggleLeft(
+                new GUIContent("Force full rebuild", "Ignore the incremental build cache and re-probe/re-render every asset. Slow at real-project scale (thousands of assets) - only needed after changing RunCatalogBuild/RenderMetadataProbe/RenderedThumbnail themselves."),
+                _catalogForceFull);
+
+            if (GUILayout.Button(usingLabel ? $"Build Catalog (by label '{_catalogLabelFilter}')" : "Build Catalog"))
+            {
+                BuildCatalog();
+            }
+        }
+
+        private void BuildCatalog()
+        {
+            var repoRoot = RepoRoot;
+            var catalogAbs = ResolvePath(_catalogPath, repoRoot) ?? Path.Combine(repoRoot, ".cache", "catalog.json");
+            var cacheBuildPath = Path.Combine(CacheFolder, "catalog-build-cache.json");
+            var extraPrefabPaths = _catalogExtraPrefabPaths
+                .Split(',', StringSplitOptions.RemoveEmptyEntries)
+                .Select(p => p.Trim());
+
+            _catalogCancelRequested = false;
+            var lastProgressIndex = -1;
+
+            try
+            {
+                var result = RunCatalogBuild.Build(
+                    _catalogFeatureFolder,
+                    catalogAbs,
+                    cacheBuildPath,
+                    _catalogForceFull,
+                    extraPrefabPaths,
+                    labelFilter: string.IsNullOrWhiteSpace(_catalogLabelFilter) ? null : _catalogLabelFilter,
+                    onProgress: (i, total, assetPath) =>
+                    {
+                        // Throttled - at real-project scale (thousands of
+                        // assets) repainting the OS progress dialog on every
+                        // single asset is itself slow enough to notice.
+                        if (i - lastProgressIndex < 20 && i != total - 1) return;
+                        lastProgressIndex = i;
+                        var cancel = EditorUtility.DisplayCancelableProgressBar(
+                            "Building catalog", $"{i + 1}/{total}: {assetPath}",
+                            total == 0 ? 1f : (float)i / total);
+                        if (cancel) _catalogCancelRequested = true;
+                    },
+                    isCancelled: () => _catalogCancelRequested);
+
+                _statusMessage = result.Cancelled
+                    ? $"Catalog build cancelled after {result.Reused + result.Rebuilt}/{result.Total} asset(s) - {catalogAbs} left unchanged."
+                    : $"Catalog built: {result.Reused} reused, {result.Rebuilt} rebuilt, {result.Total} total -> {catalogAbs}";
+            }
+            catch (Exception ex)
+            {
+                _statusMessage = $"Catalog build failed: {ex.Message}";
+                Debug.LogException(ex);
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
         }
 
         private void DrawPipelineControls()
@@ -297,7 +443,12 @@ namespace UiAssemblerSlice.Editor.Review
             if (GUILayout.Button("Reject", GUILayout.Width(70))) Reject(row);
 
             GUI.enabled = true;
-            if (GUILayout.Button("Reassign", GUILayout.Width(70))) ShowReassignMenu(row);
+            if (GUILayout.Button("Reassign", GUILayout.Width(70)))
+            {
+                var activatorRect = GUILayoutUtility.GetLastRect();
+                activatorRect.position = GUIUtility.GUIToScreenPoint(activatorRect.position);
+                ShowReassignPicker(activatorRect, row);
+            }
 
             GUI.enabled = row.Status == "fallback_eligible";
             if (GUILayout.Button("Import as New Asset", GUILayout.Width(140))) ImportFallbackAsset(row);
@@ -340,18 +491,12 @@ namespace UiAssemblerSlice.Editor.Review
             row.RawResize = null;
         }
 
-        private void ShowReassignMenu(MatchResultEntry row)
+        // Search-as-you-type picker (CatalogPickerWindow), not a GenericMenu
+        // - see that class's doc comment for why a plain per-entry menu
+        // doesn't scale past a small fixture catalog.
+        private void ShowReassignPicker(Rect activatorScreenRect, MatchResultEntry row)
         {
-            var menu = new GenericMenu();
-            // Text-only catalog id list for this pass, not a thumbnail
-            // grid - a nicer picker is a clear future enhancement, not
-            // blocking this one.
-            foreach (var entry in _catalog)
-            {
-                var id = entry.Id;
-                menu.AddItem(new GUIContent(id), id == row.MatchedAssetId, () => Reassign(row, id));
-            }
-            menu.ShowAsContext();
+            CatalogPickerWindow.Show(activatorScreenRect, _catalog, row.MatchedAssetId, GetCatalogPreview, id => Reassign(row, id));
         }
 
         private void Reassign(MatchResultEntry row, string catalogId)
